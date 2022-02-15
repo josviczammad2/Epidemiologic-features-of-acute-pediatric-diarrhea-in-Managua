@@ -292,7 +292,7 @@ extract.IR = function(dataa){
     arrange(epidate)
   
   tsURI0 <- ts((mdataR$Incidence_density), start = c(2011,1), end = c(2019,52), frequency = 52)
-  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 93))
+  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 104))
   
   
   ###### diarrheal episodes by epi week
@@ -342,7 +342,7 @@ extract.IR2 = function(dataa, variable, value, letter){
     filter(epidate > ymd("2010-12-31") & epidate < ymd("2020-01-01"))
   
   tsURI0 <- ts((mdataR$Incidence_density), start = c(2011,1), end = c(2019,52), frequency = 52)
-  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 93))
+  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 104))
   
   
   ###### diarrheal episodes by epi week
@@ -366,7 +366,7 @@ extract.trends = function(dataa, variable, value, letter){
     filter(epidate > ymd("2010-12-31") & epidate < ymd("2020-01-01"))
   
   tsURI0 <- ts((mdataR$Incidence_density), start = c(2011,1), end = c(2019,52), frequency = 52)
-  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 93))
+  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 104))
   
   
   ###### diarrheal episodes by epi week
@@ -389,7 +389,7 @@ extract.seasonal = function(dataa, variable, value, letter){
     filter(epidate > ymd("2010-12-31") & epidate < ymd("2020-01-01"))
   
   tsURI0 <- ts((mdataR$Incidence_density), start = c(2011,1), end = c(2019,52), frequency = 52)
-  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 93))
+  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 104))
   
   
   ###### diarrheal episodes by epi week
@@ -412,7 +412,7 @@ extract.random = function(dataa, variable, value, letter){
     filter(epidate > ymd("2010-12-31") & epidate < ymd("2020-01-01"))
   
   tsURI0 <- ts((mdataR$Incidence_density), start = c(2011,1), end = c(2019,52), frequency = 52)
-  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 93))
+  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 104))
   
   
   ###### diarrheal episodes by epi week
