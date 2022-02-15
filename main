@@ -1,0 +1,1335 @@
+##### libraries ############################
+library(data.table)
+library(dtplyr)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(survival)
+library(survminer)
+library(coxme)
+library(broom)
+#install_github('junkka/ehahelper')
+library(ehahelper)
+library(lme4)
+library(epitools)
+library(forecast)
+library(xts)
+library(broom.mixed)
+library(anthro)
+library(glmmTMB)
+library(DHARMa)
+library(fitdistrplus)
+library(broom)
+library(mgcv)
+library(mgcViz)
+library(gridExtra)
+library(cowplot)
+
+## ggplot theme
+My_Theme = theme(
+  axis.title.x = element_text(size = 12),
+  axis.text.x = element_text(size = 10),
+  axis.title.y = element_text(size = 12),
+  axis.text.y = element_text(size = 10))
+
+
+########### read previously created objects ###################
+# enrollment data
+load("dates7.Rdata")
+# clinical data
+load("bd2.Rdata")
+# participants survey
+load("participant.Rdata")
+# household surveys
+load("casa.Rdata")
+# BMI data
+bmi2 = read.csv("C:/Users/pc/Google Drive/R/Thesis MPH/Obesidad 2018/BMI2020.csv")
+
+
+# bitacore by week - total
+# dictionary - epiweek+year, freq of partial follow-up, freq of complete follow-up
+load("bitacorebyweektotal.Rdata")
+
+
+## datos generales
+generaldata <- readr::read_csv("Datos_Generales_Data.txt") %>%
+  mutate(birthday = as.Date(dmy_hms(fechana))) %>%
+  dplyr::select(codigo, sexo, birthday, Codigo_Casa)
+
+############# creating dataset for analysis #########################
+
+
+#consults in follow-up time (consults during consent time participants)
+bd3 <-  bd2 %>%
+  filter(int_overlaps(interval(n1, e1), interval(consultation_date, consultation_date)) |
+           int_overlaps(interval(n2, e2), interval(consultation_date, consultation_date)) |
+           int_overlaps(interval(n3, e3), interval(consultation_date, consultation_date)) |
+           int_overlaps(interval(n4, e4), interval(consultation_date, consultation_date))) %>%
+  filter(consultation_date > ymd("2010-12-31") & consultation_date < ymd("2020-01-01"))
+
+
+# participant information in follow-up time
+participant2 <- participant %>% left_join(dates7, by = "codigo") %>%
+  filter(int_overlaps(interval(n1, e1), interval(fecha, fecha)) |
+           int_overlaps(interval(n2, e2), interval(fecha, fecha)) |
+           int_overlaps(interval(n3, e3), interval(fecha, fecha)) |
+           int_overlaps(interval(n4, e4), interval(fecha, fecha)))
+
+# manipulating participant's data
+participant3 <- mutate(participant2,dates = as.Date(fecha), age = floor((dates - birthday)/365.25),
+                       status = 0, lagdate = NA_real_, salida = NA_character_, 
+                       `Section A00-A09` = 0) %>%
+  dplyr::select(codigo, `Section A00-A09`, sexo, birthday, dates, lagdate, age, status, salida)  %>%
+  filter(dates > ymd("2010-12-31") & dates < ymd("2020-01-01")) %>%
+  mutate(origin = "participant3")
+
+
+# manipulating obesity data
+obesidad3 <-  bmi2 %>% mutate(fecha =  year(mdy(year)), codigo = id, year = mdy(year)) %>%
+  filter(year > mdy("12-31-2010") & year< mdy("01-01-2020"))  %>%
+  mutate(year = fecha) %>%
+  mutate(origin = "obesidad3")
+
+# household information during follow-up 
+casa2 <- casa %>% left_join(dates7, by = "codigo") %>%
+  filter(int_overlaps(interval(n1, e1), interval(fecha, fecha)) |
+           int_overlaps(interval(n2, e2), interval(fecha, fecha)) |
+           int_overlaps(interval(n3, e3), interval(fecha, fecha)) |
+           int_overlaps(interval(n4, e4), interval(fecha, fecha)))
+
+# manipulating houshold info
+casa3 <- mutate(casa2, dates = as.Date(fecha), age = floor((dates - birthday)/365.25),
+                status = 0, lagdate = NA_real_, salida = NA_character_, `Section A00-A09` = 0) %>%
+  dplyr::select(codigo, `Section A00-A09`, sexo, birthday, dates, lagdate, age, status, salida) %>%
+  filter(dates > ymd("2010-12-31") & dates < ymd("2020-01-01")) %>%
+  mutate(origin = "casa3")
+
+# manipulating disease data
+# `Section A00-A09` intestinal infectious diseases ICD code
+diseased <- bd2 %>%
+  filter(D1 != 14, D1 != 15) %>%
+  dplyr::select(codigo, `Section A00-A09`, sexo, birthday, consultation_date) %>%
+  arrange(codigo, consultation_date) %>%
+  group_by(codigo) %>%
+  mutate(lagdate = if_else(lag(`Section A00-A09`) == 1, as.numeric(consultation_date) - lag(as.numeric(consultation_date)), 21, missing = 21),
+  ) %>%
+  mutate(age = floor(as.numeric((consultation_date - birthday)/365.25))) %>%
+  mutate(status = if_else(`Section A00-A09` == 1, 1, 0), salida = NA,
+         status = if_else(lag(lagdate,1) < 20 & `Section A00-A09` == 1, 0, status, missing = status)) %>%
+  rename(dates = consultation_date)  %>%
+  ungroup() %>%
+  filter(dates > ymd("2010-12-31") &  dates < ymd("2020-01-01")) %>%
+  group_by(codigo) %>% arrange(dates) %>%
+  ungroup() %>% mutate(origin = "bd2")
+
+## Censored information
+censored <- dates7 %>%
+  dplyr::select(codigo, e1, e2, e3, e4, sexo, birthday) %>%
+  gather(salida, loss, -codigo, -sexo, -birthday, na.rm = T) %>%
+  mutate(lagdate = NA_integer_, status = 0,`Section A00-A09` = 0)  %>%
+  mutate(age = floor(as.numeric((loss - birthday)/365.25))) %>%
+  rename(dates = loss)  %>%
+  filter(dates > ymd("2010-12-31") & dates < ymd("2020-01-01")) %>%
+  group_by(codigo) %>% arrange(dates) %>%
+  mutate(origin = "censored")
+
+### start dates
+start <- dates7 %>%
+  dplyr::select(codigo, n1, n2, n3, n4, sexo, birthday) %>%
+  gather(salida, st, -codigo, -sexo, -birthday, na.rm = T) %>%
+  mutate(lagdate = NA_integer_, status = 0,`Section A00-A09` = 0)  %>%
+  mutate(age = floor(as.numeric((st - birthday)/365.25))) %>%
+  rename(dates = st)  %>%
+  left_join(dates7, by = ("codigo")) %>% 
+  mutate(dates = ifelse(salida == "n1" & dates < ymd("2011-01-01") & e1 > ymd("2010-12-31"), ymd("2011-01-01"), dates),
+         dates = ifelse(salida == "n2" & dates < ymd("2011-01-01") & e2 > ymd("2010-12-31"), ymd("2011-01-01"), dates),
+         dates = ifelse(salida == "n3" & dates < ymd("2011-01-01") & e3 > ymd("2010-12-31"), ymd("2011-01-01"), dates),
+         dates = ifelse(salida == "n4" & dates < ymd("2011-01-01") & e4 > ymd("2010-12-31"), ymd("2011-01-01"), dates)) %>%
+  mutate(dates = as_date(dates)) %>%
+  group_by(codigo) %>% arrange(dates) %>%
+  filter(dates < ymd("2020-01-01") & dates > ymd("2010-12-31")) %>%
+  rename(sexo = sexo.x, birthday = birthday.x) %>%
+  dplyr::select(codigo, sexo, birthday, salida, dates, lagdate, status, `Section A00-A09`, age) %>%
+  mutate(origin = "start")
+
+
+# create dataset for calculating pt for survival package
+tab.KM0 <- rbind.data.frame(diseased, censored, start, participant3, casa3) %>%
+  arrange(codigo, dates) %>%
+  mutate(
+    age_groups = cut(as.numeric(age), c(2,4,9,14),include.lowest = T, labels = c("2-4","5-9","10-14"))
+  ) %>%
+  group_by(codigo) %>%
+  arrange(codigo, dates) %>%
+  mutate(followup = as.numeric(dates - lag(dates)),
+         followup = if_else(salida %in% c("n1", "n2", "n3", "n4"), 0, followup),
+         followup = if_else(lag(status) == 1, followup-20, followup),
+         followup = if_else(followup < 0, 0, followup, missing = 0),
+         complete_followup =as.numeric(dates - lag(dates)),
+         complete_followup = if_else(salida %in% c("n1", "n2", "n3", "n4"), 0, complete_followup, missing = 0)) %>%
+  arrange(codigo, dates) %>%
+  mutate(stoptime = cumsum(followup),
+         starttime = lag(stoptime, 1),
+         starttime = if_else(salida %in% c("n1", "n2", "n3", "n4"), 0, starttime),
+         startdate = dates - days(followup))  %>%
+  ungroup(codigo) %>%
+  filter(!salida %in% c("n1", "n2", "n3", "n4")) %>%
+  filter(
+    !followup == 0) %>% # not at risk 
+  mutate(epiweek = paste0(year(dates),"/",isoweek(dates))) %>%
+  mutate(age2 = as.numeric(startdate - birthday)/365.25,
+         age_groups2 =  cut(age2, c(1,4,9,14),include.lowest = T, labels = c("2-4","5-9","10-14"))) 
+
+# joining more datasets when the participants were observed
+tab.KM <-   mutate(tab.KM0, year = year(dates)) %>%
+  left_join(casa, by = c("codigo", "year")) %>%
+  left_join(participant, by = c("codigo", "year")) %>%
+  filter(dates > ymd("2010-12-31")) %>%
+  group_by(codigo) %>%
+  arrange(year) %>%
+  ungroup() %>%
+  filter( !is.na(horasaguaf)) %>%
+  mutate(week = factor(month(dates))) 
+
+tab.KM2 <- dplyr::select(tab.KM, birthday, codigo, sexo, status, starttime, stoptime, followup, age, age_groups, horasaguaf, horasagua,
+                         dates, year, complete_followup, startdate, `Section A00-A09`, origin) %>%
+  group_by(codigo) %>%
+  mutate(cumepisode = cumsum(status)) %>% ungroup() %>%
+  group_by(codigo, sexo, birthday, status, age, age_groups, horasaguaf, horasagua, cumepisode, origin) %>%
+  mutate(followup = sum(followup), starttime = first(starttime),
+         stoptime = last(stoptime), complete_followup = sum(complete_followup)) %>% ungroup() %>% 
+  distinct(codigo, sexo, status, age, age_groups, age, horasaguaf, horasagua, cumepisode, origin, .keep_all = TRUE) %>%
+  mutate(age_groupsf = cut(age, c(1,5,9,14), c("2-5", "6-9", "10-14")), month = month(dates),
+         trimester = cut(month, c(1,4,8,12), include.lowest = T)) %>% group_by(codigo) %>%
+  mutate(totalepisodes = sum(status)) %>% ungroup() %>%
+  filter(totalepisodes < 6) %>%
+  left_join(obesidad3 %>% dplyr::select(codigo,year,Obesity_status2,Zscore), by = c("codigo", "year"))%>%
+  mutate(Obesity_status = case_when(
+    Obesity_status2 == "Risk of being overweight"~  "Normoweight",
+    T~  Obesity_status2
+  )) 
+
+
+
+# raw Incidence rate of intestinal infectious diseases
+(sum(tab.KM2$status)/(sum(tab.KM2$followup)/365.25))*1000
+
+# distribution of number of episodes per participant
+boxplot(tab.KM2$totalepisodes)
+
+# relevel groups
+tab.KM2$age_groupsf <- relevel(tab.KM2$age_groupsf, "6-9")
+
+# creating horasagua as categorical
+tab.KM2$horasagua2 <- cut(tab.KM2$horasagua, breaks = c(0,1,7,24), include.lowest = T)
+
+#factor codigo
+tab.KM2$codigo2 <- factor(tab.KM2$codigo)
+
+########### table 1
+
+main_info <- tab.KM2 %>%
+  group_by(codigo, year) %>%
+  summarise( sexo = first(sexo), 
+             age_groupsf = first(age_groupsf), followup = sum(complete_followup), horasagua2 = first(horasagua2), Obesity_status = first(Obesity_status),Obesity_status2 = first(Obesity_status2)) %>% ungroup
+
+# censored participants
+main_info2 <- tab.KM2 %>%
+  filter(origin == "censored") %>%
+  group_by(year) %>%
+  summarise(n = n())
+
+
+part <- main_info %>% group_by(year) %>%
+  summarise(n = length(unique(codigo)))
+
+
+part <- data.frame(t(part[,-1]))
+
+aa <- main_info %>% group_by(year, sexo) %>%
+  summarise(n = length(unique(codigo)))  %>%
+  spread(sexo, n) %>%
+  mutate(Fp = scales::number(`F`/(`F`+ M), accuracy = 0.01),
+         Mp = scales::number(`M`/(`F`+ M), accuracy =  0.01),
+         Female = paste0(`F`," (",Fp,")"),
+         Male = paste0(`M`," (",Mp,")")) %>%
+  dplyr::select(-`F`, -M, -Fp, -Mp)
+
+aa <- data.frame(t(aa[,-1]))
+
+s <- main_info %>% group_by(year, age_groupsf) %>%
+  summarise(n = length(unique(codigo)))  %>%
+  spread(age_groupsf, n) %>%
+  mutate(Fp = scales::number(`2-5`/(`2-5`+ `6-9` + `10-14`), accuracy = 0.01),
+         Mp = scales::number( `6-9`/(`2-5`+ `6-9` + `10-14`), accuracy =  0.01),
+         Np = scales::number(`10-14`/(`2-5`+ `6-9` + `10-14`), accuracy =  0.01),
+         f = paste0(`2-5`," (",Fp,")"),
+         s = paste0( `6-9`," (",Fp,")"),
+         t = paste0(`10-14`," (",Np,")")) %>%
+  dplyr::select( -Fp, -Mp, -Np, -`6-9`, -`2-5`, -`10-14`)
+
+
+s <- data.frame(t(s[,-1]))
+
+
+horasagua <- main_info %>% group_by(year, horasagua2) %>%
+  summarise(n = length(unique(codigo)))  %>%
+  spread(horasagua2, n) %>%
+  mutate(zp = scales::number(`[0,1]` /(`[0,1]` +`(1,7]` + `(7,24]`), accuracy = 0.01),
+         tp = scales::number(`(1,7]`/(`[0,1]` +`(1,7]` + `(7,24]`), accuracy = 0.01),
+         threep = scales::number(`(7,24]`/(`[0,1]` +`(1,7]` + `(7,24]`), accuracy = 0.01),
+         
+         `[0,1]` = paste0(`[0,1]`," (",zp,")"),
+         `(1,7]` = paste0(`(1,7]`," (",tp,")"),
+         `(7,24]` = paste0(`(7,24]`," (",threep,")")) %>%
+  dplyr:: select(-`zp`, -`tp`, -`threep`)
+
+dd <- data.frame(t(horasagua[,-1]))
+
+bmi <- main_info %>% group_by(year, Obesity_status) %>%
+  summarise(n = length(unique(codigo)))  %>%
+  filter(!is.na(Obesity_status),!Obesity_status %in% c("Severe thinness","Thinness")) %>%
+  spread(Obesity_status, n) %>%
+  mutate(zp = scales::number(`Normoweight` /(`Normoweight` +`Overweight` + `Obese`), accuracy = 0.01),
+         tp = scales::number(`Overweight`/(`Normoweight` +`Overweight` + `Obese`), accuracy = 0.01),
+         threep = scales::number(`Obese`/(`Normoweight` +`Overweight` + `Obese`), accuracy = 0.01),
+         
+         Normoweight = paste0(Normoweight," (",zp,")"),
+         Overweight = paste0(Overweight," (",tp,")"),
+         Obese = paste0(Obese," (",threep,")")) %>%
+  dplyr:: select(-`zp`, -`tp`, -`threep`)
+
+ee <- data.frame(t(bmi[,-1]))[c(1,3,2),]
+# write.csv(ee, "bmi.tableone.csv")
+
+
+table1 <- rbind.data.frame(part, s, aa, dd, ee)
+colnames(table1) <- paste0(2011:2019)
+
+
+# write.csv(table1, "Output/tab1.csv")
+
+
+# BMI distribution for supplemental figure
+bmi <- main_info %>% group_by(year, Obesity_status2) %>%
+  summarise(n = length(unique(codigo)))  %>%
+  spread(Obesity_status2, n)
+
+
+
+############ creating survival objects -  ########################################
+############ caution computationally intensive
+
+## create survival object
+surv_object <- Surv(time = tab.KM2$starttime, time2 = tab.KM2$stoptime, event = tab.KM2$status)
+
+
+
+# IR by covariates 
+agg <- summary(pyears(surv_object ~ age_groupsf + sexo  + horasagua2 + codigo2,
+                      data = tab.KM2, scale = 365.25, weights = NULL, subset = NULL, na.action = NULL, data.frame = T))
+
+agg$data$age_groupsf <- relevel(agg$data$age_groupsf, "6-9")
+
+# General raw IR run with survival package
+(sum(agg$data$event)/sum(agg$data$pyears))*1000
+
+tab.KM2.bmi = tab.KM2 %>% filter(!Obesity_status %in% c("Thinness","Severe thinness"),!is.na(Obesity_status))
+
+surv_object.bmi <- Surv(time =tab.KM2.bmi$starttime, time2 = tab.KM2.bmi$stoptime, event = tab.KM2.bmi$status)
+agg.bmi = summary(pyears(surv_object.bmi ~ age_groupsf + Obesity_status + horasagua2 + codigo2 + sexo,
+                         data = tab.KM2.bmi, scale = 365.25, weights = NULL, subset = NULL, na.action = NULL, data.frame = T))
+
+(sum(agg.bmi$data$event)/sum(agg.bmi$data$pyears))*1000
+
+
+
+# IR by covariates Age numeric
+#### caution #### computationally intensive because age is not treated as categorical
+load("agg2data.Rdata")
+agg2 <- summary(pyears(surv_object ~ age + sexo  + horasagua + codigo2,
+                       data = tab.KM2, scale = 365.25, weights = NULL, subset = NULL, na.action = NULL, data.frame = T))
+
+agg2$data$codigo = as.integer(as.character(agg2$data$codigo2))
+agg$data$codigo = as.integer(as.character(agg$data$codigo2))
+
+
+########### modeling IR #############################
+agg2$data$codigo2 <- as.factor(agg2$data$codigo)
+
+
+ga_modelage = mgcv::bam(
+  event ~  offset(log(pyears)) + s(codigo2, bs = 're') + sexo + s(horasagua, bs = "tp") + s(age, bs = "tp"),
+  data = agg2$data,
+  method = 'REML',
+  family = nb(theta = NULL, link = "log"),
+)
+
+
+
+############# Cumulative episodes for each individual ##############
+agg$data %>%
+  group_by(codigo2) %>%
+  mutate(cumepi = sum(event)) %>%
+  ungroup() %>%
+  group_by(cumepi) %>%
+  summarise(cases = sum(event), n = length(unique(codigo2))) %>%
+  mutate(percentage = ((n/sum(n))*100),
+         total = sum(cases))
+
+
+ 
+mod.nb <- glmmTMB(event ~ age +   sexo + offset(log(pyears)) + horasagua + (1| codigo2),
+                  data = agg2$data, family = nbinom2,
+                  control = glmmTMBControl(optimizer=optim, optArgs=list(method="BFGS")))
+
+set.seed(457)
+## new data fixing sex and horas sin agua
+nd <- data.frame(sexo = "F", age = agg2$data$age, horasagua = median(agg2$data$horasagua),
+                 codigo2 = sample(agg2$data$codigo2, 1), pyears =  1)
+pred <-  predict(ga_modelage, type="response", se.fit=TRUE, newdata = nd, exclude = 's(codigo2, bs = "re")')
+
+set.seed(457)
+## new data fixing sex and age
+nd2 <-  data.frame(sexo = "F", age = median(agg2$data$age), horasagua = agg2$data$horasagua,
+                   codigo2 = sample(agg2$data$codigo2,1), pyears = 1)
+pred2 <-  predict(ga_modelage, type="response", se.fit=TRUE, newdata = nd2, exclude = 's(codigo2, bs = "re")')
+
+
+## predict data
+pred.data <-  cbind.data.frame(agg2$data, pred) %>%
+  mutate(IR = exp(fit)*131.8737,
+         ci97.25 = (exp(((fit)+(qnorm(0.975))*se.fit)))*131.8737, ci2.5 = (exp((fit-(qnorm(0.975))*se.fit))*131.8737))
+
+#
+pred.bmi2 <-  cbind.data.frame(agg2$data, pred2) %>%
+  mutate(IR = (exp(fit)*131.8737),
+         ci97.25 = (exp((fit+(qnorm(0.975))*se.fit))*131.8737), ci2.5 = (exp((fit-(qnorm(0.975))*se.fit))*131.8737))
+
+
+# Figure 2
+# non-linear effect of age
+A <- ggplot(pred.data, aes(age, IR)) + geom_line(aes(color = "Model fit", linetype = "Model fit")) +  
+  geom_line(aes(y = ci97.25, color = "95% CI", linetype = "95% CI")) +
+  geom_line(aes(y = ci2.5, color = "95% CI", linetype = "95% CI"), linetype = 2) + 
+  theme_bw() + labs(title = "A",x = "Age", y = "Incidence Rate \nper 1,000 person-years") +
+  scale_x_continuous(breaks = c(2,4,6,8,10,12,14,16)) +
+  scale_color_manual(name = "",values = c(`95% CI` = "black", `Model fit` = "black") )+
+  scale_linetype_manual(name="",values= c(`95% CI` = 'dashed', `Model fit` = 'solid'))
+
+# non-linear effect of horas agua
+B <- ggplot(pred.bmi2, aes(horasagua, IR)) + geom_line(aes(color = "Model fit", linetype = "Model fit")) + 
+  geom_line(aes(y = ci97.25, color = "95% CI", linetype = "95% CI")) +
+  geom_line(aes(y = ci2.5, color = "95% CI", linetype = "95% CI")) + theme_bw() + labs(title = "B",x = "Time without water",  y = "Incidence Rate \nper 1,000 person-years") +
+  scale_x_continuous(limits = c(0,24), breaks = c(seq(0,24,6)))+
+  scale_color_manual(name = "",values = c(`95% CI` = "black", `Model fit` = "black") )+
+  scale_linetype_manual(name="",values= c(`95% CI` = 'dashed', `Model fit` = 'solid'))
+
+
+C <- grid.arrange(A,B, ncol = 1)
+# ggsave(plot = C, filename = "Output/ENE22-2022 non-linear effects of age and hours without water.png", device = "png",
+# height = 10, width = 8)
+# ggsave(plot = C, filename = "Output/ENE22-2022 non-linear effects of age and hours without water.pdf", device = "pdf", height = 10, width = 8)
+
+
+###### Check GAM model 
+
+viz <- getViz(ga_modelage, nsim = 1000, post = T)
+print(plot(viz, allTerms = T), pages = 1)
+dev.off()   
+gam.check(ga_modelage)
+
+
+a <-   plot(sm(viz,2)) +   l_fitLine(size = 1) +  # l_ciPoly(fill = "light blue") +
+  l_ciLine(linetype = 3, size = .8) + 
+  theme_bw() + labs(x = "Hours without water", y = "Relative incidence rate", title = "B") +
+  scale_x_continuous(limits = c(0,24), breaks = seq(0,24,2))
+
+b <-   plot(sm(viz,3)) + l_fitLine(size =1) +
+  l_ciLine(linetype = 3, size = .8) +
+  theme_bw() + labs(x = "Age", y = "Relative proportion", title = "A") + 
+  scale_x_continuous(limits = c(2,13), breaks = seq(2,13,1)) 
+
+c <-  plot(pterm(viz,1)) + labs(x = "Sex", y = "Relative incidence rate") + l_ciBar(colour = "black") + l_fitPoints() 
+
+e <- plot(sm(viz,1))
+
+# gam average fit for age and hours without water
+d <- gridPrint(b, a)
+
+# ggsave("plot.png", d, width = 8, height = 6)
+
+
+
+## model visual check
+check(viz,
+      a.qq = list(method = "auto", 
+                  a.cipoly = list(fill = "light blue")), 
+      a.respoi = list(size = 0.5), 
+      a.hist = list(bins = 10))
+
+
+# check what is the best distribution to use 
+# negative binomial or poisson
+descdist(agg$data$event, discrete = F)
+
+############ sensitivity analysis ########################
+# Computationally intensive models
+
+
+#### Poisson
+mod.pois <- glmmTMB(event ~ age_groupsf +   sexo + offset(log(pyears)) + horasagua2 + (1| codigo2),
+                    data = agg$data, family = poisson(link = "log"),
+                    control = glmmTMBControl(optimizer=optim, optArgs=list(method="BFGS")))
+
+
+### negative binomial 
+mod.nb <- glmmTMB(event ~ age_groupsf +   sexo + offset(log(pyears)) + horasagua2 + (1| codigo2),
+                  data = agg$data, family = nbinom2,
+                  control = glmmTMBControl(optimizer=optim, optArgs=list(method="BFGS")))
+
+
+
+
+# Zero inflated - poisson
+
+mod.z.p <- glmmTMB(event ~ age_groupsf +   sexo + offset(log(pyears)) + horasagua2 + (1| codigo2)
+                   , ziformula = ~ age_groupsf + sexo + horasagua2,
+                   data = agg$data, family = poisson(link = "log"),
+                   control = glmmTMBControl(optimizer=optim, optArgs=list(method="BFGS")))
+
+
+
+mod.z.p.bmi <- glmmTMB(event ~ age_groupsf + Obesity_status+  sexo + offset(log(pyears)) + horasagua2 + (1| codigo2)
+                       , ziformula = ~ age_groupsf + sexo + horasagua2 + Obesity_status,
+                       data = agg.bmi$data, family = poisson(link = "log"),
+                       control = glmmTMBControl(optimizer=optim, optArgs=list(method="BFGS")))
+
+
+# Zero inflated - negative bin
+mod.z.nb <- glmmTMB(event ~ age_groupsf +   sexo + offset(log(pyears)) + horasagua2 + (1| codigo2),
+                    ziformula = ~
+                      age_groupsf + sexo + horasagua2,
+                    data = agg$data, family = nbinom2,
+                    control = glmmTMBControl(optimizer=optim, optArgs=list(method="BFGS")))
+
+
+mod.z.nb.bmi <- glmmTMB(event ~ age_groupsf +  Obesity_status +sexo + offset(log(pyears)) + horasagua2 + (1| codigo2),
+                    ziformula = ~
+                      age_groupsf + sexo + horasagua2+Obesity_status,
+                    data = agg.bmi$data, family = nbinom2,
+                    control = glmmTMBControl(optimizer=optim, optArgs=list(method="BFGS")))
+
+
+
+# glmer nb
+fitglmer2 <-   glmer.nb(event ~ age_groupsf + sexo + offset(log(pyears)) + horasagua2 +  (1| codigo2)
+                        , data = agg$data,
+                        family = nbinom2,
+                        control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))
+
+
+# glmer poisson
+fitglmer <- glmer(event ~ age_groupsf +   sexo + offset(log(pyears)) + horasagua2  + (1| codigo2)
+                    ,
+                    data = agg$data, family = poisson(link = "log"),
+                    control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))
+
+
+fitglmer.bmi <- glmer(event ~ age_groupsf +   sexo + offset(log(pyears)) + horasagua2  + (1| codigo2) +  Obesity_status
+                      ,
+                      data = agg.bmi$data, family = poisson(link = "log"),
+                      control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))
+
+
+### model check
+
+plot(residuals(fitglmer, type = "response"))
+plot(y = residuals(fitglmer), fitted(fitglmer, type = "response"))
+plot(fitted(fitglmer) ~ agg$data$event, col="darkgrey", 
+     xlim=c(0, 8), ylim=c(0, 8), 
+     xlab="Y (response)", ylab="Fitted Values")
+abline(a=0, b=1, col="red")
+
+
+fitglmer2.bmi <-   glmer.nb(event ~ age_groupsf + sexo +Obesity_status  +offset(log(pyears)) +  (1| codigo2) 
+                            , data = agg.bmi$data,
+                            family = nbinom2,
+                            control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))
+
+fitglmer2.bmi2 <-   glmer.nb(event ~ age_groupsf + sexo +Obesity_status  +offset(log(pyears)) +  (1| codigo2) +horasagua2
+                             , data = agg.bmi$data,
+                             family = nbinom2,
+                             control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))
+
+
+##################### compare models ######################
+
+
+# checking better models
+anova(fitglmer, fitglmer2)
+
+# checking best models. Nb is better
+anova(fitglmer.bmi, fitglmer2.bmi2)
+
+# checking better models
+anova(mod.pois,mod.nb,mod.z.p,mod.z.nb)
+
+
+glmer.sim1 <- simulate(mod.nb, nsim = 1000)
+glmer.sim2 <- simulate(mod.z.nb, nsim = 1000)
+glmer.sim3 <- simulate(fitglmer, nsim = 1000)
+glmer.sim4 <- simulate(fitglmer2, nsim = 1000)
+
+
+out <- matrix(NA, ncol = 4, nrow = 8)
+cnt <- 0:7
+for (i in 1:length(cnt)) {
+  for (j in 1:4) {
+    eval(parse(text = paste("out[i,", j, "] <- 
+          mean(sapply(glmer.sim", j,",\nFUN = function(x) {\nsum(x == cnt  
+      [i]) }))", sep = "")))
+  }
+}
+
+plot(table(agg$data$event), ylab = "Frequency", xlab = "Y", lwd = 2, 
+     col="darkgrey")
+lines(x = 0:7, y = out[, 1], lwd = 2, lty = 2, col = "red")  
+lines(x = 0:7, y = out[, 2], lwd = 2, lty = 2, col = "blue")    
+lines(x = 0:7, y = out[, 3], lwd = 2, lty = 2, col = "black")    
+lines(x = 0:7, y = out[, 4], lwd = 2, lty = 2, col = "yellow")    
+
+
+plot(table(agg$data$event), ylab = "Frequency", xlab = "Y", lwd = 2, 
+     col="darkgrey")
+lines(x = 0:7, y = out[, 1], lwd = 2, lty = 2, col = "red")    
+lines(x = 0:7, y = out[, 2], lwd = 2, lty = 2, col = "blue")
+
+plot(residuals(fitglmer, type="deviance") ~ fitted(fitglmer), col="darkgrey")
+plot(EP~fitted(fitglmer))
+abline(h=0, col="red")
+
+plot(residuals(fitglmer, type="pearson") ~ fitted(fitglmer), col="darkgrey")
+abline(h=0, col="red")
+
+
+plot(fitted(fitglmer) ~ agg$data$event, col="darkgrey", 
+     xlim=c(0, 8), ylim=c(0, 8), 
+     xlab="Y (response)", ylab="Fitted Values")
+abline(a=0, b=1, col="red")
+
+
+plot(simulateResiduals(fitglmer), rank = T)
+
+
+
+### check random effect
+randoms <- merTools::REsim(fitglmer, n.sims = 2)
+merTools::plotREsim(randoms)
+
+
+
+#### function for extracting fixed effects in a tidy way
+ti2 <- function(x){ 
+  x %>%
+    tidy("fixed",
+         scales = NULL,
+         ran_prefix = T,
+         conf.int = T,
+         conf.level = 0.95,
+         conf.method = "Wald") %>%
+    mutate(
+      conf.low2 =  scales::number((estimate - (qnorm(.975, lower.tail = T)*std.error)), accuracy = 0.01,digits = 2),
+      conf.high2 = scales::number((estimate + (qnorm(.975, lower.tail = T)*std.error)), accuracy = 0.01,digits = 2),
+      estimate2 =  scales::number((estimate), accuracy = 0.01),
+      p.value2 = scales::pvalue(p.value)) %>%
+    dplyr::select(-std.error, -statistic) %>%
+    mutate(term = as.character(term),
+           CI95 = paste0("(",conf.low," - ", conf.high, ")")) %>%
+    filter(term != "(Intercept)") %>%
+    dplyr::select(- p.value, conf.low, conf.high, -effect, term, estimate, CI95, p.value2)
+  
+}
+
+# similar to ti2
+ti3 <- function(x){ 
+  x %>%
+    tidy(parametric = T,
+         scales = NULL,
+         ran_prefix = T,
+         conf.int = T,
+         conf.level = 0.95,
+         conf.method = "Wald") %>%
+    mutate(
+      conf.low2 =  scales::number((estimate - (qnorm(.975, lower.tail = T)*std.error)), accuracy = 0.01,digits = 2),
+      conf.high2 = scales::number((estimate + (qnorm(.975, lower.tail = T)*std.error)), accuracy = 0.01,digits = 2),
+      estimate2 =  scales::number((estimate), accuracy = 0.01),
+      p.value2 = scales::pvalue(p.value)) %>%
+    dplyr::select(-std.error, -statistic) %>%
+    mutate(term = as.character(term),
+           CI95 = paste0("(",conf.low2," - ", conf.high2, ")")) %>%
+    filter(term != "(Intercept)") %>%
+    dplyr::select(- p.value, conf.low2, conf.high2, term, estimate, CI95, p.value2) %>%
+    mutate(conf.low = as.numeric(conf.low2),
+           conf.high = as.numeric(conf.high2))
+  
+}
+
+ti2.bmi <- function(x){ 
+  x %>%
+    tidy("fixed",
+         scales = NULL,
+         ran_prefix = T,
+         conf.int = T,
+         conf.level = 0.95,
+         conf.method = "Wald",
+         exponentiate = T) %>%
+    mutate(
+      conf.low2 =  scales::number((estimate - (qnorm(.975, lower.tail = T)*std.error)), accuracy = 0.01,digits = 2),
+      conf.high2 = scales::number((estimate + (qnorm(.975, lower.tail = T)*std.error)), accuracy = 0.01,digits = 2),
+      estimate2 =  scales::number((estimate), accuracy = 0.01),
+      p.value2 = scales::pvalue(p.value)) %>%
+    dplyr::select(-std.error, -statistic) %>%
+    mutate(term = as.character(term),
+           CI95 = paste0("(",conf.low," - ", conf.high, ")")) %>%
+    filter(term != "(Intercept)") %>%
+    dplyr::select(- p.value, conf.low, conf.high, -effect, term, estimate, CI95, p.value2)
+  
+}
+
+
+
+#### different IR models - GAMs and GLMs
+p<- rbind( 
+  ti2(fitglmer) %>% mutate(model = "GLMM poisson"),
+  ti2(fitglmer2) %>% mutate(model = "GLMM Negative binomial"),
+  ti2(mod.z.p) %>% mutate(model = "Zip GLMM Poisson") %>% filter(component == "cond") %>% dplyr::select(-component),
+  ti2(mod.z.nb) %>% mutate(model = "Zip GLMM Negative binomial") %>% filter(component == "cond") %>% dplyr::select(-component)
+ 
+) 
+
+p.bmi<- rbind( 
+  ti2(fitglmer.bmi) %>% mutate(model = "GLMM poisson"),
+  ti2(fitglmer2.bmi2) %>% mutate(model = "GLMM Negative binomial"),
+  ti2(mod.z.p.bmi) %>% mutate(model = "Zip GLMM Poisson") %>% filter(component == "cond") %>% dplyr::select(-component),
+  ti2(mod.z.nb.bmi) %>% mutate(model = "Zip GLMM Negative binomial") %>% filter(component == "cond") %>% dplyr::select(-component)
+  
+) 
+
+p$term <- factor(p$term, levels = c("age_groupsf2-5", "age_groupsf10-14", "sexoM", "horasagua2(1,7]", 
+                                    "horasagua2(7,24]"), labels = c(
+                                      "Age 2-5", "Age 10-14", "Sex Male", "1-7 hours w/o water", "8-24 hours w/o water"
+                                    ))
+p.bmi$term <- factor(p.bmi$term, levels = c("age_groupsf2-5", "age_groupsf10-14", "sexoM", "horasagua2(1,7]", 
+                                            "horasagua2(7,24]","Obesity_statusOverweight","Obesity_statusObese"), labels = c(
+                                              "Age 2-5", "Age 10-14", "Sex Male", "1-7 hours w/o water", "8-24 hours w/o water","Overweight","Obese"
+                                            ))
+
+
+p$model <- factor(p$model, levels = c("GLMM Negative binomial", "GLMM poisson", "Zip GLMM Poisson", "Zip GLMM Negative binomial"), 
+                  labels =  c("GLMM Negative binomial", "GLMM poisson", "Zip GLMM Poisson", "Zip GLMM Negative binomial"))
+p.bmi$model <- factor(p.bmi$model, levels = c("GLMM Negative binomial", "GLMM poisson", "Zip GLMM Poisson", "Zip GLMM Negative binomial"), 
+                      labels =  c("GLMM Negative binomial", "GLMM poisson", "Zip GLMM Poisson", "Zip GLMM Negative binomial"))
+
+
+p$term <- forcats::fct_rev(p$term)
+p$model <- forcats::fct_rev(p$model)
+p.bmi$term <- forcats::fct_rev(p.bmi$term)
+p.bmi$model <- forcats::fct_rev(p.bmi$model)
+
+
+
+### plot of the sentivity analysis
+sensitivity = ggplot(data=p, aes(term, exp(estimate), ymin= exp(conf.low), ymax= exp(conf.high), color = model)) +
+  geom_pointrange(position = position_dodge(0.5)) + 
+  geom_hline(yintercept=1.00, lty=2) +  # add a dotted line at x=1 after flip
+  coord_flip() +  # flip coordinates (puts labels on y axis)
+  xlab("Terms") + ylab("Incidence rate ratio (95% CI)") +
+  theme_bw(base_size = 10)  +
+  geom_text(aes(label = p.value2), position =  position_dodge(0.5), hjust = -1.25, vjust = 0, size = 3) +
+  #scale_y_continuous(limits = c(-1.0, 1.1)) + 
+  theme(legend.position = "bottom") + My_Theme + guides(colour = guide_legend(nrow = 3, byrow = T, reverse = T, title= "Models")) +
+  scale_y_continuous( limits = c(0.34,2.9),
+                      breaks = c(0.4, 0.8, 1, 1.25, 2.5),
+                      trans = scales::log_trans())
+
+# bmi subset model
+sensitivity2 = ggplot(data=p.bmi, aes(term, exp(estimate), ymin= exp(conf.low), ymax= exp(conf.high), color = model)) +
+  geom_pointrange(position = position_dodge(0.5)) + 
+  geom_hline(yintercept=1.00, lty=2) +  # add a dotted line at x=1 after flip
+  coord_flip() +  # flip coordinates (puts labels on y axis)
+  xlab("Terms") + ylab("Incidence rate ratio (95% CI)") +
+  theme_bw(base_size = 10)  +
+  geom_text(aes(label = p.value2), position =  position_dodge(0.5), hjust = -1.25, vjust = 0, size = 3) +
+  #scale_y_continuous(limits = c(-1.0, 1.1)) + 
+  theme(legend.position = "bottom") + My_Theme + guides(colour = guide_legend(nrow = 3, byrow = T, reverse = T, title= "Models")) +
+  scale_y_continuous( limits = c(0.26,3.75),
+                      breaks = c(0.26,0.4, 0.8, 1, 1.25, 2.5,3.75),
+                      trans = scales::log_trans())
+
+
+# ggsave(plot = sensitivity, filename = "Output/ENE22-2022 sensitivity.png", device = "png", width = 8, height = 7)
+# ggsave(plot = sensitivity, filename = "Output/ENE22-2022 sensitivity.pdf", device = "pdf", width = 8, height = 7)
+# ggsave(plot = sensitivity2, filename = "Output/FEB11-2022 sensitivity2.pdf", device = "pdf", width = 8, height = 7)
+# ggsave(plot = sensitivity2, filename = "Output/FEB11-2022 sensitivity2.png", device = "png", width = 8, height = 7)
+
+
+# tidy function 
+ti <- function(x){ 
+  x %>%
+    tidy("fixed",
+         scales = NULL,
+         ran_prefix = T,
+         conf.int = T,
+         conf.level = 0.95,
+         conf.method = "Wald") %>%
+    mutate(
+      conf.low =  scales::number(exp(estimate - (qnorm(.975, lower.tail = T)*std.error)), accuracy = 0.1,digits = 1),
+      conf.high = scales::number(exp(estimate + (qnorm(.975, lower.tail = T)*std.error)), accuracy = 0.1,digits = 1),
+      estimate =  scales::number(exp(estimate), accuracy = 0.1),
+      p.value2 = scales::pvalue(p.value)) %>%
+    dplyr::select(-std.error, -statistic) %>%
+    mutate(term = as.character(term),
+           CI95 = paste0("(",conf.low," - ", conf.high, ")")) %>%
+    filter(term != "(Intercept)") %>%
+    dplyr::select(- p.value, -conf.low, -conf.high, -effect, term, estimate, CI95, p.value2)
+  
+}
+
+# IRR multivaiate model
+multi <- ti(fitglmer2)
+multi.bmi <- ti(fitglmer2.bmi2)
+
+#### univariate IRR model glmer
+u0 <- (glmer(event ~ 1 + offset(log(pyears)) +  (1| codigo2),
+             data = agg$data, family = nbinom2))
+
+u1 <- (glmer(event ~ age_groupsf + offset(log(pyears)) +  (1| codigo2),
+             data = agg$data, family = nbinom2,
+             control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))) %>% ti()
+
+u2 <- (glmer(event ~ sexo + offset(log(pyears)) + (1| codigo2),
+             data = agg$data, family = nbinom2,
+             control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))) %>% ti()
+
+u3 <- (glmer(event ~ horasagua2 + offset(log(pyears)) + (1| codigo2),
+             data = agg$data, family = nbinom2,
+             control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))) %>% ti()
+
+# obesity
+u4 <- glmer(event ~ Obesity_status + offset(log(pyears)) + (1| codigo2),data = agg.bmi$data, family = nbinom2,
+            control=glmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000))) %>% ti()
+
+# Univariate analysis
+uni <- rbind.data.frame(u1,u2, u3)
+
+
+# write.csv(uni, "uni.csv")
+# 
+# write.csv(multi, "multi.csv")
+
+### univariate and multivariate results
+results <- full_join(uni, multi, by = "term")
+
+# write.csv(results, "Output/JUN30-2021 table2.csv")
+
+## function to calculate IR based on intercept models
+tii <- function(x) { 
+  x %>% broom::tidy() %>%
+    mutate(
+      conf.low =  scales::number(exp(estimate - (qnorm(.975, lower.tail = T)*std.error)), accuracy = 0.1,digits = 1, scale = 1000),
+      conf.high = scales::number(exp(estimate + (qnorm(.975, lower.tail = T)*std.error)), accuracy = 0.1,digits = 1, scale = 1000),
+      estimate =  scales::number(exp(estimate), accuracy = 0.1,  scale = 1000),
+      p.value2 = scales::pvalue(p.value)) %>%
+    dplyr::select(-std.error, -statistic) %>%
+    mutate(term = as.character(term),
+           CI95 = paste0("(",conf.low," - ", conf.high, ")")) %>%
+    dplyr::select(estimate, CI95, p.value2) %>%
+    slice(1)
+}
+
+
+#### calculate univariate IRs
+# all
+IO <- ((glmer(event ~ 1 + offset(log(pyears)) + (1| codigo2),
+              data = agg$data, family = nbinom2))) %>% tii()
+edad1 <- ((glmer(event ~ 1 + offset(log(pyears))+ (1| codigo2),
+                 data = agg$data[agg$data$age_groupsf == "2-5", ], family = nbinom2))) %>% tii()
+edad2 <- ((glmer(event ~ 1 + offset(log(pyears))+ (1| codigo2),
+                 data = agg$data[agg$data$age_groupsf == "6-9", ], family = nbinom2))) %>% tii()
+edad3 <- ((glmer(event ~ 1 + offset(log(pyears))+ (1| codigo2),
+                 data = agg$data[agg$data$age_groupsf == "10-14", ], family = nbinom2))) %>% tii()
+female <- ((glmer(event ~ 1 + offset(log(pyears))+ (1| codigo2),
+                  data = agg$data[agg$data$sexo == "F", ], family = nbinom2))) %>% tii()
+male <- ((glmer(event ~ 1 + offset(log(pyears))+ (1| codigo2),
+                data = agg$data[agg$data$sexo == "M", ], family = nbinom2))) %>% tii()
+agua1 <- ((glmer(event ~ 1 + offset(log(pyears))+ (1| codigo2),
+                 data = agg$data[agg$data$horasagua2 == "[0,1]", ], family = nbinom2))) %>% tii()
+agua2 <- ((glmer(event ~ 1 + offset(log(pyears))+ (1| codigo2),
+                 data = agg$data[agg$data$horasagua2 == "(1,7]", ], family = nbinom2))) %>% tii()
+agua3 <- ((glmer(event ~ 1 + offset(log(pyears))+ (1| codigo2),
+                 data = agg$data[agg$data$horasagua2 == "(7,24]", ], family = nbinom2))) %>% tii()
+
+bmi2 <- ((glmer(event ~ 1 + offset(log(pyears))+ (1| codigo2),
+                data = agg.bmi$data[agg.bmi$dat$Obesity_status == "Normoweight", ], family = nbinom2))) %>% tii()
+bmi3 <- ((glmer(event ~ 1 + offset(log(pyears))+ (1| codigo2),
+                data = agg.bmi$data[agg.bmi$dat$Obesity_status == "Overweight", ], family = nbinom2))) %>% tii()
+bmi4 <- ((glmer(event ~ 1 + offset(log(pyears))+ (1| codigo2),
+                data = agg.bmi$data[agg.bmi$dat$Obesity_status == "Obese", ], family = nbinom2))) %>% tii()
+
+
+tab22 <- cbind(IR = c("General", "2-5", "6-9", "10-14", "Female", "Male", "horasagua 0-1", "horas agua 2-7", "horas agua 8-24","Normoweight","Overweight","Obese"),rbind.data.frame(IO, edad1, edad2, edad3, female, male, agua1, agua2, agua3, bmi2,bmi3,bmi4)) %>%
+  dplyr::select(estimate, CI95) 
+
+# write.csv(tab22, "Output/JUN30-2021 g.csv")
+
+
+
+## IR #######################
+
+#https://www.inide.gob.ni/censos2005/VolPoblacion/Volumen%20Poblacion%201-4/Vol.I%20Poblacion-Caracteristicas%20Generales.pdf
+
+## Managua population
+poblacion_nicaragua <- data.frame(age_groupsf = c("2-5", "6-9", "10-14"),
+                                  pop = c(26725 +  26327 +  29206 +  28153,
+                                          25302 +  25579 +  24860 + 24366,
+                                          28273 + 27339 +  30470 + 28424 
+                                  ))
+
+
+######### Crude -calculating IRs ###########
+tab.KM2$flag = 1
+general.IR <- summary(pyears(surv_object ~ flag, data = tab.KM2, scale = 365.25, weights = NULL, subset = NULL, na.action = NULL, data.frame = T))
+age_groupspy0 <- summary(pyears(surv_object ~ age_groupsf, data = tab.KM2, scale = 365.25, weights = NULL, subset = NULL, na.action = NULL, data.frame = T))
+sexpy <- summary(pyears(surv_object ~ sexo, data = tab.KM2, scale = 365.25, weights = NULL, subset = NULL, na.action = NULL, data.frame = T))
+horaspy <- summary(pyears(surv_object ~ horasagua2, data = tab.KM2, scale = 365.25, weights = NULL, subset = NULL, na.action = NULL, data.frame = T))
+
+
+a <- pois.approx(general.IR$data$event, general.IR$pyears, conf.level = 0.95)
+b <- pois.approx(sexpy$data$event, sexpy$pyears, conf.level = 0.95)
+c <- pois.approx(age_groupspy0$data$event, age_groupspy0$pyears, conf.level = 0.95)
+f <- pois.approx(horaspy$data$event, horaspy$pyears, conf.level = 0.95)
+
+
+hh <- rbind.data.frame(a, b, c, f) %>%
+  mutate(rate = scales::number(rate*1000, accuracy = 0.01),
+         lower = scales::number(lower*1000, accuracy = 0.01),
+         upper = scales::number(upper*1000, accuracy = 0.01),
+         pt = scales::number(pt, accuracy = 0.01, big.mark = ",")) %>%
+  dplyr::select(-conf.level) %>%
+  dplyr::rename(Cases = x, `Person-years` = pt, LowerCI95 = lower, UpperCI95 = upper, `Incidence Rate per 1000 person-years` = rate) %>%
+  cbind.data.frame(Cat = c("Crude rate", "Female", "Male", "Age 2-4 y/o", "Age 5-9 y/o", "Age 10-14 y/o",
+                           "0", "1-7", "> 7")) %>%
+  mutate(CI = paste0("(",LowerCI95," - ", UpperCI95,")")) %>%
+  dplyr::select(-LowerCI95, -UpperCI95)
+
+age_groupspy0 <- summary(pyears(surv_object ~ age_groupsf, data = tab.KM2, scale = 365.25, weights = NULL, subset = NULL, na.action = NULL, data.frame = T))
+age_groupspy0$data <- left_join(age_groupspy0$data, poblacion_nicaragua)
+
+d <- ageadjust.direct(age_groupspy0$data$event, pop = age_groupspy0$data$pyears, 
+                      stdpop =  age_groupspy0$data$pop, 
+                      conf.level = .95)
+d <- data.frame(x = sum((general.IR$event/general.IR$pyears)* sum(poblacion_nicaragua$pop)), pt = sum(poblacion_nicaragua$pop),
+                rate = d[2], lower = d[3], upper = d[4], conf.level = 0.95)
+
+
+age_sexpy0 <- summary(pyears(surv_object ~ sexo + age_groupsf, data = tab.KM2, scale = 365.25, weights = NULL, subset = NULL, na.action = NULL, data.frame = T))
+age_sexpy0$data <- left_join(age_sexpy0$data, poblacion_nicaragua)
+
+ddF0 <- age_sexpy0$data %>% filter(sexo == "F")
+ddF <- ageadjust.direct(ddF0$event, pop = ddF0$pyears, 
+                        stdpop = ddF0$pop, 
+                        conf.level = .95) 
+ddF <- data.frame(x = sum((ddF0$event/ddF0$pyears)*ddF0$pop), pt = sum(ddF0$pop), 
+                  rate = ddF[2], lower = ddF[3], upper = ddF[4], conf.level = 0.95)
+
+ddM0 <- age_sexpy0$data %>% filter(sexo == "M")
+ddM <- ageadjust.direct(ddM0$event, pop = ddM0$pyears, 
+                        stdpop = ddM0$pop, 
+                        conf.level = .95) 
+ddM <- data.frame(x = sum((ddM0$event/ddM0$pyears)*ddM0$pop), pt = sum(ddM0$pop), 
+                  rate = ddM[2], lower = ddM[3], upper = ddM[4], conf.level = 0.95)
+
+
+horasagepy0 <- summary(pyears(surv_object ~ horasaguaf + age_groupsf, data = tab.KM2, scale = 365.25, weights = NULL, subset = NULL, na.action = NULL, data.frame = T))
+horasagepy0$data <- left_join(horasagepy0$data, poblacion_nicaragua)
+
+
+dda0 <- horasagepy0$data %>% filter(horasaguaf == "0")
+dda <- ageadjust.direct(dda0$event, pop = dda0$pyears, 
+                        stdpop = dda0$pop, 
+                        conf.level = .95) 
+dda <- data.frame(x = sum((dda0$event/dda0$pyears)*dda0$pop), pt = sum(dda0$pop), 
+                  rate = dda[2], lower = dda[3], upper = dda[4], conf.level = 0.95)
+
+dda20 <- horasagepy0$data %>% filter(horasaguaf == "1-7")
+dda2 <- ageadjust.direct(dda20$event, pop = dda20$pyears, 
+                         stdpop = dda20$pop, 
+                         conf.level = .95) 
+dda2 <- data.frame(x = sum((dda20$event/dda20$pyears)*dda20$pop), pt = sum(dda20$pop), 
+                   rate = dda2[2], lower = dda2[3], upper = dda2[4], conf.level = 0.95)
+
+dda30 <- horasagepy0$data %>% filter(horasaguaf == "> 7")
+dda3 <- ageadjust.direct(dda30$event, pop = dda30$pyears, 
+                         stdpop = dda30$pop, 
+                         conf.level = .95) 
+dda3 <- data.frame(x = sum((dda30$event/dda30$pyears)*dda30$pop), pt = sum(dda30$pop), 
+                   rate = dda3[2], lower = dda3[3], upper = dda3[4], conf.level = 0.95)
+
+
+##
+ed <- summary(pyears(surv_object ~ age_groupsf, data = tab.KM2, scale = 365.25, weights = NULL, subset = NULL, na.action = NULL, data.frame = T))
+ed$data <- left_join(ed$data, poblacion_nicaragua)
+
+ed10 <- ed$data %>% filter(age_groupsf == "2-5")
+# age adjusting IR
+ed1 <- ageadjust.direct(ed10$event, pop = ed10$pyears, 
+                        stdpop = ed10$pop, 
+                        conf.level = .95) 
+ed1 <- data.frame(x = sum((ed10$event/ed10$pyears)*ed10$pop), pt = sum(ed10$pop), 
+                  rate = ed1[2], lower = ed1[3], upper = ed1[4], conf.level = 0.95)
+
+ed20 <- ed$data %>% filter(age_groupsf == "6-9")
+# age adjusting IR
+ed2 <- ageadjust.direct(ed20$event, pop = ed20$pyears, 
+                        stdpop = ed20$pop, 
+                        conf.level = .95) 
+ed2 <- data.frame(x = sum((ed20$event/ed20$pyears)*ed20$pop), pt = sum(ed20$pop), 
+                  rate = ed2[2], lower = ed2[3], upper = ed2[4], conf.level = 0.95)
+
+ed30 <- ed$data %>% filter(age_groupsf == "10-14")
+
+# age adjusting IR
+ed3 <- ageadjust.direct(ed30$event, pop = ed30$pyears, 
+                        stdpop = ed30$pop, 
+                        conf.level = .95) 
+ed3 <- data.frame(x = sum((ed30$event/ed30$pyears)*ed30$pop), pt = sum(ed30$pop), 
+                  rate = ed3[2], lower = ed3[3], upper = ed3[4], conf.level = 0.95)
+
+## merging tables
+part2 <- data.frame(rbind.data.frame(agead = d, Female = ddF, Male = ddM, ed1 = ed1, ed2 = ed2, ed3 = ed3,
+                                     # asma2 = ddasma2, asma1 = ddasma1,
+                                     horas1 = dda, horas2 = dda2, horas3 = dda3
+                                     # cr1 = ddacrw, cr2 = ddacrw2, cr3 = ddacrw3
+)*1000) %>% dplyr::select(3:5) %>% mutate_all(.funs = function(x)(round(x,2)))
+
+################ part of table two
+tab20 <- cbind.data.frame(hh, part2)
+
+tab2 <- cbind.data.frame(hh, part2) %>%
+  dplyr::rename(LowerCI95 = lower, UpperCI95 = upper, `Age-adjusted Incidence rates per 1,000 person-years` = rate) %>%
+  mutate(CIad = paste0("(",LowerCI95," - ", UpperCI95,")")) %>%
+  dplyr::select(-LowerCI95, -UpperCI95)
+
+
+
+### proportion of people with zero, one, two or more than three episodes
+tab.KM2 %>% group_by(codigo) %>%
+  summarise(t = max(cumepisode)) %>%
+  mutate( t0 = t==0,
+          t1 = t == 1,
+          t2 = t == 2,
+          t3 = t == 3,
+          t4 = t >3) %>%
+  summarise(n = n(), sum(t0)/n, sum(t1)/n ,sum(t2)/n, sum(t3)/n, sum(t4)/n)
+
+################ cohort dynamics ###################
+library(readxl)
+
+dates <- read_xlsx("C:/Users/pc/Google Drive/R/Thesis MPH/Krista/DRAFT_dengue_enter_exit_dates v03Feb20.xlsx", sheet = 2) %>%
+  filter(is.na(Caution)) %>%
+  mutate_if(is.POSIXct, as_date) %>%
+  mutate(active1 = if_else(is.na(calculatedExit1), 1, 0),
+         active2 = if_else(is.na(calculatedExit2) & !is.na(ReactDate1), 1, 0),
+         active3 = if_else(is.na(calculatedExit3) & !is.na(ReactDate2), 1, 0),
+         active4 = if_else(is.na(calculatedExit4) & !is.na(ReactDate3), 1, 0))
+#actually fourteenbirth
+fourteenth <- dates$birthday + years(14); fourteenth <- if_else(is.na(fourteenth), (dates$birthday - period(1, "days") + years(14)), fourteenth) - period(1, "days")
+secondbirth <- dates$birthday + years(2); 
+end_study <- as_date("2020/01/01");
+start_study <- as_date("2010/12/31");
+
+dates20 <-  dates %>% mutate(
+  eo1 = if_else(calculatedExit1 > end_study, end_study, calculatedExit1),
+  eo1 = if_else(eo1 > fourteenth, fourteenth, eo1),
+  
+  eo2 = if_else(calculatedExit2 > end_study, end_study, calculatedExit2),
+  eo2 = if_else(eo2 > fourteenth, fourteenth, eo2),
+  
+  eo3 = if_else(calculatedExit3 > end_study, end_study, calculatedExit3),
+  eo3 = if_else(eo3 > fourteenth, fourteenth, eo3),
+  
+  eo4 = if_else(calculatedExit4 > end_study, end_study, calculatedExit4),
+  eo4 = if_else(eo4 > fourteenth, fourteenth, eo4),
+  
+  e1 = if_else(active1 == 1 & (fourteenth > end_study), end_study, eo1),
+  e1 = if_else(active1 == 1 & (fourteenth  <= end_study), fourteenth, e1),
+  
+  e2 = if_else(active2 == 1 & (fourteenth > end_study), end_study, eo2),
+  e2 = if_else(active2 == 1 & (fourteenth  <= end_study), fourteenth, e2),
+  
+  e3 = if_else(active3 == 1 & (fourteenth > end_study), end_study, eo3),
+  e3 = if_else(active3 == 1 & (fourteenth  <= end_study), fourteenth, e3),
+  
+  e4 = if_else(active4 == 1 & (fourteenth > end_study), end_study, eo4),
+  e4 = if_else(active4 == 1 & (fourteenth  <= end_study), fourteenth, e4),
+  
+  n1 = if_else(EnterDate1 < start_study, start_study, EnterDate1),
+  n1 = if_else(n1 < secondbirth, secondbirth, n1),
+  n1 = if_else(n1 > end_study, end_study, n1),
+  n1 = if_else(n1 > fourteenth, fourteenth, n1, missing = EnterDate1),
+  
+  
+  n2 = if_else(ReactDate1 > end_study, end_study, ReactDate1),
+  n2 = if_else(n2 > fourteenth, fourteenth, n2),
+  n2 = if_else(n2 < start_study, start_study, n2),
+  n2 = if_else(n2 < secondbirth, secondbirth, n2),
+  
+  n3 = if_else(ReactDate2 > end_study, end_study, ReactDate2),
+  n3 = if_else(n3 > fourteenth, fourteenth, n3),
+  
+  n4 =  if_else(ReactDate3 > end_study, end_study, ReactDate3),
+  n4 = if_else(n4 > fourteenth, fourteenth, n4),
+  
+  n1 = if_else(n1 == e1, ymd(NA), n1),
+  n2 = if_else(n2 == e2, ymd(NA), n2),
+  n3 = if_else(n3 == e3, ymd(NA), n3),
+  n4 = if_else(n4 == e4, ymd(NA), n4),
+  
+  e1 = if_else(is.na(e1 - n1), ymd(NA), e1),
+  e2 = if_else(is.na(e2 - n2), ymd(NA), e2),
+  e3 = if_else(is.na(e3 - n3), ymd(NA), e3),
+  e4 = if_else(is.na(e4 - n3), ymd(NA), e4),
+  
+  c1 = e1 - n1, 
+  c2 = e2 - n2,  
+  c3 = e3 - n3,  
+  c4 = e4 - n4,
+  total = purrr::pmap_dbl(list(c1, c2, c3, c4), sum, na.rm = T),
+  
+  #clos.contact = as_date(purrr::pmap_dbl(list(ClosestContact1, ClosestContact2, ClosestContact3, ClosestContact4), min, na.rm = T)),
+  
+) %>%
+  mutate_if(is.difftime, as.numeric) %>%
+  mutate(
+    caution2 = if_else((c1 < 0) | (c2 < 0) | (c3 < 0) | (c4 < 0), 1, 0, missing = 0),
+    caution3 = if_else((e1 > n2) | (e2 > n3) | (e3 > n4), 1, 0, missing = 0),
+    caution4 = if_else(codigo == 5015, 1, 0, missing = 0),
+    
+  )
+
+#### issued codes
+issues <- dates20 %>%
+  filter_at(vars(starts_with("caution")), any_vars(. == 1))
+
+
+dates3 <- dates20 %>%
+  filter(caution2 != 1, caution3 !=1, caution4 != 1)
+
+## accounting for follow-up
+dates5 <- dates3 %>%
+  mutate(
+    
+    b1.1 = (n1 - birthday),
+    b1.2 = (e1 - birthday),
+    b2.1 = (n2 - birthday),
+    b2.2 = (e2 - birthday),
+    b3.1 = (n3 - birthday),
+    b3.2 = (e3 - birthday),
+    b4.1 = (n4 - birthday),
+    b4.2 = (e4 - birthday),
+  ) %>% 
+  mutate_if(is.difftime, as.numeric)
+
+
+#### contribution per interval
+
+Age4 <- round(3.999*365.25);
+Age8 <- round(8.999*365.25) 
+Age14 <- round(13.999*365.25) 
+
+
+# contribution per age interval
+dates6 <- dates5 %>%
+  mutate(
+    a4cont = Age4 - b1.1,
+    a4cont = if_else(a4cont < 0, 0, a4cont),
+    a4cont = if_else((b1.2 <= Age4), b1.1+b1.2,a4cont),
+    
+    a8cont = if_else(a4cont == 0 & (b1.1 >= Age4) & (b1.2 <= Age8), b1.2-b1.1, 0),
+    a8cont = if_else(a4cont == 0 & (b1.1 <= Age8) & (b1.2 >= Age8), Age8-b1.1, a8cont),
+    a8cont = if_else(a4cont != 0 & (b1.2 <= Age4), 0, a8cont),
+    a8cont = if_else(a4cont != 0 & (b1.2 >= Age4) & (b1.2 <= Age8), b1.2-Age4, a8cont),
+    a8cont = if_else(a4cont != 0 & (b1.2 >= Age4) & (b1.2 >= Age8), Age8-Age4, a8cont),
+    
+    a14cont = if_else(a8cont == 0 & (b1.1 >= Age8) & (b1.2 <= Age14), b1.2-b1.1, 0),
+    a14cont = if_else(a8cont == 0 & (b1.1 <= Age14) & (b1.2 >= Age14), Age14-b1.1, a14cont),
+    a14cont = if_else(a8cont != 0 & (b1.2 <= Age8), 0, a14cont),
+    a14cont = if_else(a8cont != 0 & (b1.2 >= Age8) & (b1.2 <= Age14), b1.2-Age8, a14cont),
+    a14cont = if_else(a8cont != 0 & (b1.2 >= Age8) & (b1.2 >= Age14), Age14-Age8, a14cont),
+    
+    totalI1 = a4cont+a8cont+a14cont,
+    
+    a4cont2 = Age4 - b2.1,
+    a4cont2 = if_else(a4cont2 < 0, 0, a4cont2),
+    a4cont2 = if_else((b2.2 <= Age4), b2.1+b2.2,a4cont2),
+    
+    a8cont2 = if_else(a4cont2 == 0 & (b2.1 >= Age4) & (b2.2 <= Age8), b2.2-b2.1, 0),
+    a8cont2 = if_else(a4cont2 == 0 & (b2.1 <= Age8) & (b2.2 >= Age8), Age8-b2.1, a8cont2),
+    a8cont2 = if_else(a4cont2 != 0 & (b2.2 <= Age4), 0, a8cont2),
+    a8cont2 = if_else(a4cont2 != 0 & (b2.2 >= Age4) & (b2.2 <= Age8), b2.2-Age4, a8cont2),
+    a8cont2 = if_else(a4cont2 != 0 & (b2.2 >= Age4) & (b2.2 >= Age8), Age8-Age4, a8cont2),
+    
+    a14cont2 = if_else(a8cont2 == 0 & (b2.1 >= Age8) & (b2.2 <= Age14), b2.2-b2.1, 0),
+    a14cont2 = if_else(a8cont2 == 0 & (b2.1 <= Age14) & (b2.2 >= Age14), Age14-b2.1, a14cont2),
+    a14cont2 = if_else(a8cont2 != 0 & (b2.2 <= Age8), 0, a14cont2),
+    a14cont2 = if_else(a8cont2 != 0 & (b2.2 >= Age8) & (b2.2 <= Age14), b2.2-Age8, a14cont2),
+    a14cont2 = if_else(a8cont2 != 0 & (b2.2 >= Age8) & (b2.2 >= Age14), Age14-Age8, a14cont2),
+    
+    totalII = a4cont2 + a8cont2+ a14cont2,
+    
+    a4cont3 = Age4 - b3.1,
+    a4cont3 = if_else(a4cont3 < 0, 0, a4cont3),
+    a4cont3 = if_else((b3.2 <= Age4), b3.1+b3.2,a4cont3),
+    
+    a8cont3 = if_else(a4cont3 == 0 & (b3.1 >= Age4) & (b3.2 <= Age8), b3.2-b3.1, 0),
+    a8cont3 = if_else(a4cont3 == 0 & (b3.1 <= Age8) & (b3.2 >= Age8), Age8-b3.1, a8cont3),
+    a8cont3 = if_else(a4cont3 != 0 & (b3.2 <= Age4), 0, a8cont3),
+    a8cont3 = if_else(a4cont3 != 0 & (b3.2 >= Age4) & (b3.2 <= Age8), b3.2-Age4, a8cont3),
+    a8cont3 = if_else(a4cont3 != 0 & (b3.2 >= Age4) & (b3.2 >= Age8), Age8-Age4, a8cont3),
+    
+    a14cont3 = if_else(a8cont3 == 0 & (b3.1 >= Age8) & (b3.2 <= Age14), b3.2-b3.1, 0),
+    a14cont3 = if_else(a8cont3 == 0 & (b3.1 <= Age14) & (b3.2 >= Age14), Age14-b3.1, a14cont3),
+    a14cont3 = if_else(a8cont3 != 0 & (b3.2 <= Age8), 0, a14cont3),
+    a14cont3 = if_else(a8cont3 != 0 & (b3.2 >= Age8) & (b3.2 <= Age14), b3.2-Age8, a14cont3),
+    a14cont3 = if_else(a8cont3 != 0 & (b3.2 >= Age8) & (b3.2 >= Age14), Age14-Age8, a14cont3),
+    
+    totalIII = a4cont3+a8cont3+a14cont3,
+    
+    a4cont4 = Age4 - b4.1,
+    a4cont4 = if_else(a4cont4 < 0, 0, a4cont4),
+    a4cont4 = if_else((b4.2 <= Age4), b4.1+b4.2,a4cont4),
+    
+    a8cont4 = if_else(a4cont4 == 0 & (b4.1 >= Age4) & (b4.2 <= Age8), b4.2-b4.1, 0),
+    a8cont4 = if_else(a4cont4 == 0 & (b4.1 <= Age8) & (b4.2 >= Age8), Age8-b4.1, a8cont4),
+    a8cont4 = if_else(a4cont4 != 0 & (b4.2 <= Age4), 0, a8cont4),
+    a8cont4 = if_else(a4cont4 != 0 & (b4.2 >= Age4) & (b4.2 <= Age8), b4.2-Age4, a8cont4),
+    a8cont4 = if_else(a4cont4 != 0 & (b4.2 >= Age4) & (b4.2 >= Age8), Age8-Age4, a8cont4),
+    
+    a14cont4 = if_else(a8cont4 == 0 & (b4.1 >= Age8) & (b4.2 <= Age14), b4.2-b4.1, 0),
+    a14cont4 = if_else(a8cont4 == 0 & (b4.1 <= Age14) & (b4.2 >= Age14), Age14-b4.1, a14cont4),
+    a14cont4 = if_else(a8cont4 != 0 & (b4.2 <= Age8), 0, a14cont4),
+    a14cont4 = if_else(a8cont4 != 0 & (b4.2 >= Age8) & (b4.2 <= Age14), b4.2-Age8, a14cont4),
+    a14cont4 = if_else(a8cont4 != 0 & (b4.2 >= Age8) & (b4.2 >= Age14), Age14-Age8, a14cont4),
+    
+    totalIV = a4cont4+a8cont4+a14cont4)
+
+
+# total per age interval contributed by each participant
+dates7 <- dates6 %>%
+  rowwise() %>%
+  mutate(total4 = sum(a4cont,  a4cont2, a4cont3, a4cont4, na.rm = T),
+         total8 = sum(a8cont,  a8cont2, a8cont3, a8cont4, na.rm = T),
+         total14 = sum(a14cont,  a14cont2, a14cont3, a14cont4, na.rm = T)) %>%
+  filter(total > 1)
+#
+
+
+## people enter
+enters0 <- c(dates7$n1,dates7$n2, dates7$n3, dates7$n4) 
+enters2 <- data.frame(enters0, real = if_else(enters0 <= start_study, ymd("2010-12-31"), enters0 ))
+enters3 <- data.frame(table(year(enters2$real)))
+
+# people reactivating
+react02 <- sum(!is.na(dates7$n2))
+react03 <- sum(!is.na(dates7$n3))
+react04 <- sum(!is.na(dates7$n4))
+
+# people exiting
+exits0 <- c(dates7$e1, dates7$e2, dates7$e3, dates7$e4) 
+exits2 <- data.frame(exits0, real = if_else(exits0 >= end_study, ymd("2020-01-01"), exits0 ))
+exits3 <- data.frame(table(year(exits2$real))) %>% filter(!Var1 %in% c(2005,2009))
+
+
+dynamics0 <- full_join(enters3,exits3, by = "Var1") %>%
+  rename(year = Var1,
+         enters = Freq.x,
+         censored = Freq.y) %>%
+  arrange(year) %>%
+  mutate(
+    enters = case_when(is.na(enters) ~ 0, T ~ as.numeric(enters)), 
+    censored = case_when(is.na(censored) ~ 0, T ~ as.numeric(censored)),
+    active = cumsum(lag(enters,1,default = 0)) - cumsum(censored)
+  )
+
+
+## table of people entering, leaving, or staying active
+tot <- dynamics0 %>% mutate(total = enters + censored + active,
+                            cenP = (censored/total)*100) %>%
+  filter(year != 2010 & year != 2020)
+
+
+
+## cohort dynamics
+dynamics <- dynamics0 %>%
+  gather(status, number, -year) %>%
+  mutate(status = factor(status, levels = c("active", "enters", "censored"),
+                         labels = c("Active", "New enrollments (active)", "Loss-to-follow up"))) 
+
+median(dynamics[dynamics$status == "Active", "number"] + dynamics[dynamics$status == "New enrollments (active)", "number"])
+
+### people entering, staying or leaving the cohort
+p1 <- ggplot(dynamics[dynamics$year != 2010 & dynamics$year != 2020, ], aes(year, number, fill = status)) + 
+  geom_col(color = "black", position = "dodge") + 
+  theme_light(base_size = 14) +
+  labs(title = "",  subtitle = paste("N =", 
+                                     formatC((nrow(dates7)), format="f", big.mark=",", digits = 0),
+                                     "participants"), y = "Count", x = "Year")+
+  scale_fill_brewer(palette = "Accent" ) + My_Theme  + theme(legend.position = "bottom")
+
+# ggsave("plot 1.png", p1, width = 8, height = 6, units = "in", device = "png")
+
+# average participation time
+median(as.numeric(dates7$total))/365.25
+
+fivenum(as.numeric(dates7$total))/365.25
+
+# average new members
+mean(tot$enters)
+
+
+## unique participants
+length(unique(dates7$codigo))
+
+## total follow up time
+sum(dates7$total)/365.25
+
+
+
+
+ss <- start[(start$codigo %in% tab.KM2$codigo),]
+cc <- censored[(censored$codigo %in% tab.KM2$codigo),]
+
+## number of new enrollments by year
+ss1 <- ss %>% group_by(codigo) %>% filter(row_number() == 1) %>% ungroup() %>%
+  mutate(year = year(dates)) %>%
+  group_by(codigo, year) %>%
+  dplyr::select(codigo, year) %>% ungroup() %>% unique()
+
+## censored people by year
+cc1 <- cc %>% mutate(year = year(dates)) %>%
+  group_by(codigo, year) %>%
+  dplyr::select(codigo, year)  %>% ungroup() %>%unique()  
+
+table(ss1$year)
+table(cc1$year)
+
+
+
+length(unique(tab.KM2$codigo))
+length(unique(ss$codigo))
+length(unique(cc$codigo))
+
+
+
+
