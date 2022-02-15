@@ -163,11 +163,7 @@ extract_ir_per_week = function(table, variable){
                        Incidence_density = (cases/PY),
                        Interval_risk = 1-exp(-Incidence_density*(7/365.25)),
                        Cumulative_risk = 1-exp(-(cumsum(Incidence_density)*(7/365.25)))) %>%
-                     rename(variable = variable) )%>%
-    mutate(Incidence_density = na.approx(Incidence_density),
-           PY =  na.approx(PY))%>% 
-    mutate(Incidence_density = 
-             if_else(Incidence_density > 0.7, median(Incidence_density, na.rm = T), Incidence_density))
+                     rename(variable = variable) )
   
   
 }
@@ -210,11 +206,7 @@ extract_ir_per_week_general = function(table){
                      mutate(
                        Incidence_density = (cases/PY),
                        Interval_risk = 1-exp(-Incidence_density*(7/365.25)),
-                       Cumulative_risk = 1-exp(-(cumsum(Incidence_density)*(7/365.25)))) )%>%
-    mutate(Incidence_density = na.approx(Incidence_density),
-           PY =  na.approx(PY))%>% 
-    mutate(Incidence_density = 
-             if_else(Incidence_density > 0.7, median(Incidence_density, na.rm = T), Incidence_density))
+                       Cumulative_risk = 1-exp(-(cumsum(Incidence_density)*(7/365.25)))) )
   
   
 }
@@ -288,7 +280,6 @@ extract.IR = function(dataa){
     dplyr::select(epidate, Incidence_density, week, year) %>%
     mutate(Incidence_density = Incidence_density  * 1000) %>%
     filter(epidate > ymd("2010-12-31") & epidate < ymd("2020-01-01")) %>%
-    mutate(Incidence_density = if_else(Incidence_density > 450, median(Incidence_density), Incidence_density)) %>%
     arrange(epidate)
   
   tsURI0 <- ts((mdataR$Incidence_density), start = c(2011,1), end = c(2019,52), frequency = 52)
