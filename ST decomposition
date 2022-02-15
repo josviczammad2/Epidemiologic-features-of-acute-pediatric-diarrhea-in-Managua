@@ -1,0 +1,548 @@
+##### libraries ############################
+library(data.table)
+library(dtplyr)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(survival)
+library(survminer)
+library(coxme)
+library(broom)
+#install_github('junkka/ehahelper')
+library(ehahelper)
+library(lme4)
+library(epitools)
+library(forecast)
+library(xts)
+library(DHARMa)
+library(fitdistrplus)
+library(broom)
+library(mgcv)
+library(mgcViz)
+library(gridExtra)
+library(cowplot)
+library(stringr)
+
+## ggplot theme
+My_Theme = theme(
+  axis.title.x = element_text(size = 12),
+  axis.text.x = element_text(size = 10),
+  axis.title.y = element_text(size = 12),
+  axis.text.y = element_text(size = 10))
+
+
+#https://www.inide.gob.ni/censos2005/VolPoblacion/Volumen%20Poblacion%201-4/Vol.I%20Poblacion-Caracteristicas%20Generales.pdf
+
+## Managua population
+poblacion_nicaragua <- data.frame(age_groupsf = c("2-5", "6-9", "10-14"),
+                                  pop = c(26725 +  26327 +  29206 +  28153,
+                                          25302 +  25579 +  24860 + 24366,
+                                          28273 + 27339 +  30470 + 28424 
+                                  ))
+
+
+
+######################## time series analysis ##############################
+
+# diagnostics data
+load("JUN21-2021 bd3.Rdata")
+# household surveys
+load("casa.Rdata")
+# participants survey
+load("participant.Rdata")
+# BMI data
+data2 = read.csv("C:/Users/pc/Google Drive/R/Thesis MPH/Obesidad 2018/BMI2020.csv")
+
+
+# Load weekly participation log
+load("bitacorebyweekwithPersonaldata2.Rdata")
+
+b5.2 <- b5.2 %>% 
+  left_join(obesidad3 %>% dplyr::select(codigo,year,Obesity_status2,Zscore) %>% mutate(year = as.character(year)), by = c("codigo", "year")) %>%
+  filter(!(partial == 0 & complete == 0)) %>% # removes participants who were not in the study at the time
+  filter(epidate >= ymd("2011/01/01") & epidate < ymd("2019/12/31")) %>%
+  filter(!is.na(age_groupsf )) %>%
+  mutate(year = as.numeric( str_split(epiweekyear,pattern = "\\/", simplify = T)[,1], truncated = 2L)) %>%
+  left_join(casa, by = c("codigo", "year")) %>%
+  mutate(Obesity_status = case_when(
+    Obesity_status2 == "Risk of being overweight"~  "Normoweight",
+    T~  Obesity_status2
+  )) 
+
+
+# follow-up time by week 
+b6 = b5.2 %>%
+  lazy_dt() %>%
+  group_by(epiweekyear) %>%
+  summarise(partial = sum(partial), complete = sum(complete), contribution = sum(contribution)) %>%
+  as_tibble()
+
+
+# follow-up time by week and age
+b6.2 = b5.2 %>%
+  lazy_dt() %>%
+  group_by(epiweekyear, age_groupsf) %>%
+  summarise(partial = sum(partial), complete = sum(complete), contribution = sum(contribution)) %>%
+  as_tibble()
+
+# follow-up time by week and sex
+b6.3 = b5.2 %>%
+  lazy_dt() %>%
+  group_by(epiweekyear, sexo) %>%
+  summarise(partial = sum(partial), complete = sum(complete), contribution = sum(contribution)) %>%
+  as_tibble()  
+
+# follow-up time by week and horasagua
+b6.4 = b5.2 %>%
+  lazy_dt() %>%
+  group_by(epiweekyear, horasaguaf) %>%
+  summarise(partial = sum(partial), complete = sum(complete), contribution = sum(contribution)) %>%
+  as_tibble()  %>%
+  filter(!is.na(horasaguaf))
+
+# follow-up time by week and Obesidad
+b6.5 = b5.2 %>%
+  lazy_dt() %>%
+  group_by(epiweekyear, Obesity_status) %>%
+  summarise(partial = sum(partial), complete = sum(complete), contribution = sum(contribution)) %>%
+  as_tibble()  %>%
+  filter(!is.na(Obesity_status))
+
+
+end_study <- as_date("2019/12/31");
+start_study <- as_date("2011/01/01");
+
+
+##### participants with more than 6 episodes
+greaterthan6 <- c(201,3244,5212,5396,5398,5601,5831,5834,5852,5863,6042,6146,6228,6239,6298,6321,6377,6406,6451,6456,6532,6559,6589,6610,6614,6678,6697,6600,7027,7082,7127,7187,7251,7255,7262,7379,7435,6268,6489,6545,7706,7763,7801,7836,7864,7903,7904,6939,7473,7502,7543,7547,7605,8201,8209,8271,8518,7988,8059,8063,8110,8872,8910,8134,8135,8152,8756,9193,9331,8759,8770,9085,9845,9544)
+
+
+bd33 <- bd3 %>%
+  left_join(casa, by = c("codigo","year"))  %>%
+  left_join(obesidad3 %>% dplyr::select(id, Obesity_status2,year), c("codigo" = "id", "year" = "year")) %>%
+  mutate(Obesity_status = case_when(
+    Obesity_status2 == "Risk of being overweight"~  "Normoweight",
+    T~  Obesity_status2
+  )) 
+
+extract_ir_per_week = function(table, variable){
+  (left_join(bd33, table, by = c(variable,"epiweekyear")) %>% 
+                     rename(variable = variable) %>%
+                     mutate(fecha = if_else(`Section A00-A09` == 1, year(consultation_date), NA_real_)) %>%
+                     left_join(casa, by = c("codigo", "year")) %>%
+                     left_join(participant, by = c("codigo", "year")) %>%
+                     filter(!codigo %in% greaterthan6) %>%
+                     mutate(total = partial + complete) %>%
+                     group_by(codigo) %>%
+                     arrange(codigo, consultation_date) %>%
+                     mutate(difPD = as.numeric(consultation_date-lag(consultation_date,1)),
+                            difPD = if_else(is.na(difPD), 21, difPD)) %>%
+                     mutate(not_at_risk = if_else(difPD < 21 & lag(`Section A00-A09`, 1) == 1 |
+                                                    difPD < 21 & lag(`Section A00-A09`, 2) == 1, 1, 0, missing = 0),
+                            `Section A00-A09` = `Section A00-A09` - not_at_risk,
+                            `Section A00-A09` = if_else(`Section A00-A09` < 0, 0, `Section A00-A09`)) %>% 
+                     ungroup(codigo) %>%
+                     group_by(epiweekyear, variable) %>%
+                     summarise(not_at_risk = sum(not_at_risk), cases = sum(`Section A00-A09`), atrisk = first(complete),
+                               withdraw =  first(partial), total = first(total), codigo = first(codigo)) %>% 
+                     #mutate(cases = if_else(cases < 0, 0, cases)) %>%
+                     separate(epiweekyear, c("year","week"), remove = F) %>%
+                     mutate(year = as.numeric(year), week = as.numeric(week)) %>%
+                     arrange(year, week) %>%
+                     mutate(epidate = ymd(as.Date(paste(year, week, "1", sep="-"), "%Y-%U-%w"))) %>%
+                     mutate(epidate = if_else(is.na(epidate), (lag(epidate,2)+ days(14)), epidate)) %>%
+                     ungroup() %>% 
+                     arrange(epidate) %>%
+                     mutate( # accounting for PY loss after cases
+                       PY2 = (((total)-(not_at_risk))-(withdraw/2))*(7/365.25),
+                       PY = if_else(epidate - lag(epidate, 1) < 21, (((total)-(not_at_risk)-(lag(cases,1)))-(withdraw/2))*(7/365.25), PY2),
+                       PY = if_else(epidate - lag(epidate, 2) < 21,  (((total)-(not_at_risk)-(lag(cases,2)))-(withdraw/2))*(7/365.25), PY),
+                       PY = if_else( epidate - lag(epidate, 3) < 21, (((total)-(not_at_risk)-(lag(cases,3)))-(withdraw/2))*(7/365.25), PY),
+                       PY = case_when(is.na(PY) ~ PY2, T ~ PY)) %>%
+                     mutate(
+                       Incidence_density = (cases/PY),
+                       Interval_risk = 1-exp(-Incidence_density*(7/365.25)),
+                       Cumulative_risk = 1-exp(-(cumsum(Incidence_density)*(7/365.25)))) %>%
+                     rename(variable = variable) )%>%
+    mutate(Incidence_density = na.approx(Incidence_density),
+           PY =  na.approx(PY))%>% 
+    mutate(Incidence_density = 
+             if_else(Incidence_density > 0.7, median(Incidence_density, na.rm = T), Incidence_density))
+  
+  
+}
+extract_ir_per_week_general = function(table){
+  suppressWarnings(left_join(bd33, table, by = c("epiweekyear")) %>% 
+                     mutate(fecha = if_else(`Section A00-A09` == 1, year(consultation_date), NA_real_)) %>%
+                     left_join(casa, by = c("codigo", "year")) %>%
+                     left_join(participant, by = c("codigo", "year")) %>%
+                     # filter( !is.na(horasaguaf)) %>%
+                     filter(!codigo %in% greaterthan6) %>%
+                     #dplyr::select(`Section A00-A09`, epiweekyear, partial, complete, consultation_date, epiweek, codigo, sexo, age_groups) %>%
+                     mutate(total = partial + complete) %>%
+                     #filter(`Section A00-A09` == 1) %>%
+                     group_by(codigo) %>%
+                     arrange(codigo, consultation_date) %>%
+                     mutate(difPD = as.numeric(consultation_date-lag(consultation_date,1)),
+                            difPD = if_else(is.na(difPD), 21, difPD)) %>%
+                     mutate(not_at_risk = if_else(difPD < 21 & lag(`Section A00-A09`, 1) == 1 |
+                                                    difPD < 21 & lag(`Section A00-A09`, 2) == 1, 1, 0, missing = 0),
+                            `Section A00-A09` = `Section A00-A09` - not_at_risk,
+                            `Section A00-A09` = if_else(`Section A00-A09` < 0, 0, `Section A00-A09`)) %>% 
+                     ungroup(codigo) %>%
+                     group_by(epiweekyear) %>%
+                     summarise(not_at_risk = sum(not_at_risk), cases = sum(`Section A00-A09`), atrisk = first(complete),
+                               withdraw =  first(partial), total = first(total), codigo = first(codigo)) %>% 
+                     #mutate(cases = if_else(cases < 0, 0, cases)) %>%
+                     separate(epiweekyear, c("year","week"), remove = F) %>%
+                     mutate(year = as.numeric(year), week = as.numeric(week)) %>%
+                     arrange(year, week) %>%
+                     mutate(epidate = ymd(as.Date(paste(year, week, "1", sep="-"), "%Y-%U-%w"))) %>%
+                     mutate(epidate = if_else(is.na(epidate), (lag(epidate,2)+ days(14)), epidate)) %>%
+                     ungroup() %>% 
+                     arrange(epidate) %>%
+                     mutate( # accounting for PY loss after cases
+                       PY2 = (((total)-(not_at_risk))-(withdraw/2))*(7/365.25),
+                       PY = if_else(epidate - lag(epidate, 1) < 21, (((total)-(not_at_risk)-(lag(cases,1)))-(withdraw/2))*(7/365.25), PY2),
+                       PY = if_else(epidate - lag(epidate, 2) < 21,  (((total)-(not_at_risk)-(lag(cases,2)))-(withdraw/2))*(7/365.25), PY),
+                       PY = if_else( epidate - lag(epidate, 3) < 21, (((total)-(not_at_risk)-(lag(cases,3)))-(withdraw/2))*(7/365.25), PY),
+                       PY = case_when(is.na(PY) ~ PY2, T ~ PY)) %>%
+                     mutate(
+                       Incidence_density = (cases/PY),
+                       Interval_risk = 1-exp(-Incidence_density*(7/365.25)),
+                       Cumulative_risk = 1-exp(-(cumsum(Incidence_density)*(7/365.25)))) )%>%
+    mutate(Incidence_density = na.approx(Incidence_density),
+           PY =  na.approx(PY))%>% 
+    mutate(Incidence_density = 
+             if_else(Incidence_density > 0.7, median(Incidence_density, na.rm = T), Incidence_density))
+  
+  
+}
+
+general_rates_week = extract_ir_per_week_general(b6)
+
+ratesbyweek.age = extract_ir_per_week(b6.2, "age_groupsf") 
+ratesbyweek.age$age_groupsf = ratesbyweek.age$variable
+
+ratesbyweek.sexo = extract_ir_per_week(b6.3, "sexo")
+ratesbyweek.sexo$sexo = ratesbyweek.sexo$variable
+
+ratesbyweek.horasaguaf = extract_ir_per_week(b6.4, "horasaguaf") %>% filter(!is.na(variable))
+ratesbyweek.horasaguaf$horasaguaf = ratesbyweek.horasaguaf$variable
+
+ratesbyweek.bmi = extract_ir_per_week(b6.5, "Obesity_status") %>% filter(!is.na(variable))
+ratesbyweek.bmi$Obesity_status = ratesbyweek.bmi$variable
+
+
+
+# General rates calculation 
+(sum(general_rates_week$cases) / sum(general_rates_week$PY))*1000
+
+
+
+# age standardization of rates
+CItableCD32 <- ratesbyweek.age %>% left_join(poblacion_nicaragua)
+
+
+
+yy <- CItableCD32 %>%
+  group_by(epiweekyear, age_groupsf) %>%
+  summarise(event = sum(cases), pyears = sum(PY))
+yy <- left_join(yy,poblacion_nicaragua)
+
+
+
+
+
+rates = NULL
+for (i in 1:length(unique(CItableCD32$epiweekyear))) {
+  
+  xx <- yy %>% filter(epiweekyear == unique(CItableCD32$epiweekyear)[i])
+  
+  rat = (ageadjust.direct(xx$event, pop = xx$pyears, 
+                          stdpop = xx$pop, 
+                          conf.level = .95))
+  
+  rates = rbind.data.frame(rates, cbind.data.frame(epiweekyear = unique(CItableCD32$epiweekyear)[i],
+                                                   crude.rate = round(rat[1]*1000,2),  
+                                                   ad.rate = round(rat[2],2),   
+                                                   lower95 = round(rat[3]*1000,2),  
+                                                   higher95 = round(rat[4]*1000,2))) 
+}
+
+#crude.rate is per 1000, ad.rate is not yet multiplied by 1000 but rates are v similar (for diarrhea)
+rates = rates %>% separate(epiweekyear, c("year","week"), remove = F) %>%
+  mutate(year = as.numeric(year), week = as.numeric(week)) %>%
+  arrange(year, week) %>%
+  mutate(epidate = ymd(as.Date(paste(year, week, "1", sep="-"), "%Y-%U-%w"))) %>%
+  mutate(epidate = if_else(is.na(epidate), (lag(epidate,2)+ days(14)), epidate)) %>%
+  rename(Incidence_density = ad.rate)
+
+
+##### extract trends ########
+extract.IR = function(dataa){
+  mdataR <- dataa %>% 
+    # rename(variable = variable) %>%
+    # filter(variable == value) %>% 
+    filter(epidate >= start_study & epidate <= end_study) %>%
+    dplyr::select(epidate, Incidence_density, week, year) %>%
+    mutate(Incidence_density = Incidence_density  * 1000) %>%
+    filter(epidate > ymd("2010-12-31") & epidate < ymd("2020-01-01")) %>%
+    mutate(Incidence_density = if_else(Incidence_density > 450, median(Incidence_density), Incidence_density)) %>%
+    arrange(epidate)
+  
+  tsURI0 <- ts((mdataR$Incidence_density), start = c(2011,1), end = c(2019,52), frequency = 52)
+  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 93))
+  
+  
+  ###### diarrheal episodes by epi week
+  
+  
+  A <- autoplot(tsURI0) + theme_test(base_size = 8) +
+    scale_x_continuous(breaks = seq(from = 2011, to =  2019, by = 1)) + labs(title = "B") +
+    scale_y_continuous(limits = c(0,450)) +
+    My_Theme  +
+    theme_light(base_size = 12)  + labs(y= "Incidence rate \n per 1,000 person-years", x = "", title = "") +
+    labs(title =  "A");
+  
+  B <- autoplot(tsURI$time.series[,2]) + theme_test(base_size = 8) +
+    scale_x_continuous(breaks = seq(from = 2011, to =  2019, by = 1)) + labs(title = "B") +
+    scale_y_continuous(limits = c(100,220)) +
+    My_Theme  +
+    theme_light(base_size = 12)  + labs(y= "Incidence rate \n per 1,000 person-years", x = "", title = "") +
+    labs(title =  "B");
+ 
+  C <- autoplot(tsURI$time.series[,1]) + theme_test(base_size = 8) +
+    scale_x_continuous(breaks = seq(from = 2011, to =  2019, by = 1)) + labs(title = "B") +
+    scale_y_continuous(limits = c(-150,300)) +
+    My_Theme  +
+    theme_light(base_size = 12)  + labs(y= "Incidence rate \n per 1,000 person-years", x = "", title = "") +
+    labs(title =  "C");
+  
+  D <- autoplot(tsURI$time.series[,3]) + theme_test(base_size = 8) +
+    scale_x_continuous(breaks = seq(from = 2011, to =  2019, by = 1)) + labs(title = "B") +
+    scale_y_continuous(limits = c(-200,500)) +
+    My_Theme  +
+    theme_light(base_size = 12)  + labs(y= "Incidence rate \n per 1,000 person-years", x = "", title = "") +
+    labs(title =  "D") + geom_smooth(method = "loess");
+  
+  
+  
+  grid.arrange(A, B, C, D, ncol = 1)
+  
+ 
+}
+extract.IR2 = function(dataa, variable, value, letter){
+  mdataR <- dataa %>% 
+    rename(variable = variable) %>%
+    filter(variable == value) %>% 
+    filter(epidate >= start_study & epidate <= end_study) %>%
+    dplyr::select(epidate, Incidence_density, week, year) %>%
+    mutate(Incidence_density = Incidence_density  * 1000) %>%
+    filter(epidate > ymd("2010-12-31") & epidate < ymd("2020-01-01"))
+  
+  tsURI0 <- ts((mdataR$Incidence_density), start = c(2011,1), end = c(2019,52), frequency = 52)
+  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 93))
+  
+  
+  ###### diarrheal episodes by epi week
+  d1 <- autoplot(tsURI0) + theme_test(base_size = 8) +
+    scale_x_continuous(breaks = seq(from = 2011, to =  2019, by = 2)) + labs(title = "B") +
+    scale_y_continuous(limits = c(0,700)) +
+    My_Theme  +
+    theme_light(base_size = 12)  + labs(y= "Incidence rate \n per 1,000 person-years", x = "", title = "") +
+    labs(title =  letter);
+  suppressWarnings(d1) 
+  
+}
+
+extract.trends = function(dataa, variable, value, letter){
+  mdataR <- dataa %>% 
+    rename(variable = variable) %>%
+    filter(variable == value) %>%
+    filter(epidate >= start_study & epidate <= end_study) %>%
+    dplyr::select(epidate, Incidence_density, week, year) %>%
+    mutate(Incidence_density = Incidence_density  * 1000) %>%
+    filter(epidate > ymd("2010-12-31") & epidate < ymd("2020-01-01"))
+  
+  tsURI0 <- ts((mdataR$Incidence_density), start = c(2011,1), end = c(2019,52), frequency = 52)
+  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 93))
+  
+  
+  ###### diarrheal episodes by epi week
+  d1 <- autoplot(tsURI$time.series[,2]) + theme_test(base_size = 8) +
+    scale_x_continuous(breaks = seq(from = 2011, to =  2019, by = 2)) + labs(title = "B") +
+    scale_y_continuous(limits = c(0,300)) +
+    My_Theme  +
+    theme_light(base_size = 12)  + labs(y= "Incidence rate \n per 1,000 person-years", x = "", title = "") +
+    labs(title =  letter);
+  d1
+  
+}
+extract.seasonal = function(dataa, variable, value, letter){
+  mdataR <- dataa %>% 
+    rename(variable = variable) %>%
+    filter(variable == value) %>% 
+    filter(epidate >= start_study & epidate <= end_study) %>%
+    dplyr::select(epidate, Incidence_density, week, year) %>%
+    mutate(Incidence_density = Incidence_density  * 1000) %>%
+    filter(epidate > ymd("2010-12-31") & epidate < ymd("2020-01-01"))
+  
+  tsURI0 <- ts((mdataR$Incidence_density), start = c(2011,1), end = c(2019,52), frequency = 52)
+  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 93))
+  
+  
+  ###### diarrheal episodes by epi week
+  d1 <- autoplot(tsURI$time.series[,1]) + theme_test(base_size = 8) +
+    scale_x_continuous(breaks = seq(from = 2011, to =  2019, by = 2)) + labs(title = "B") +
+    scale_y_continuous(limits = c(-200,400)) +
+    My_Theme  +
+    theme_light(base_size = 12)  + labs(y= "Incidence rate \n per 1,000 person-years", x = "", title = "") +
+    labs(title =  letter);
+  d1
+  
+}
+extract.random = function(dataa, variable, value, letter){
+  mdataR <- dataa %>% 
+    rename(variable = variable) %>%
+    filter(variable == value) %>% 
+    filter(epidate >= start_study & epidate <= end_study) %>%
+    dplyr::select(epidate, Incidence_density, week, year) %>%
+    mutate(Incidence_density = Incidence_density  * 1000) %>%
+    filter(epidate > ymd("2010-12-31") & epidate < ymd("2020-01-01"))
+  
+  tsURI0 <- ts((mdataR$Incidence_density), start = c(2011,1), end = c(2019,52), frequency = 52)
+  tsURI <- (stl(tsclean(tsURI0), s.window = 7, s.degree = 1, robust = T, t.degree = 1, l.degree = 1, t.window = 93))
+  
+  
+  ###### diarrheal episodes by epi week
+  d1 <- autoplot(tsURI$time.series[,3]) + theme_test(base_size = 8) +
+    scale_x_continuous(breaks = seq(from = 2011, to =  2019, by = 2)) + labs(title = "B") +
+    scale_y_continuous(limits = c(-200,500)) +
+    My_Theme  +
+    theme_light(base_size = 12)  + labs(y= "Incidence rate \n per 1,000 person-years", x = "", title = "") +
+    labs(title =  letter) + geom_smooth(method = "loess");
+  d1
+  
+}
+extract.decom <- function(funs, ncol = NULL){
+  
+  gridExtra::grid.arrange(
+    funs(ratesbyweek.sexo, "sexo", "M", "A")+ theme(
+      axis.text.x  = element_blank(),
+      axis.title.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      plot.margin = unit(c(1, 0.1, 0, 0.1), "lines")),
+    funs(ratesbyweek.sexo, "sexo", "F", "B")  + theme(
+      axis.text  = element_blank(),
+      axis.title = element_blank(),
+      axis.ticks = element_blank(),
+      plot.margin = unit(c(1, 1, 0, 1), "lines")), 
+    funs(ratesbyweek.age, "agegroupsf", "2-5", "C")+ theme(
+      axis.text  = element_blank(),
+      axis.title = element_blank(),
+      axis.ticks = element_blank(),
+      plot.margin = unit(c(1, 1, 0, 1), "lines")),
+    funs(ratesbyweek.age, "agegroupsf", "6-9", "D")+ theme(
+      axis.text.x  = element_blank(),
+      axis.title.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      plot.margin = unit(c(1, 0.1, 0, 0.1), "lines")),
+    funs(ratesbyweek.age, "agegroupsf", "10-14", "E") + theme(
+      axis.text  = element_blank(),
+      axis.title = element_blank(),
+      axis.ticks = element_blank(),
+      plot.margin = unit(c(1, 1, 0, 1), "lines")),
+    funs(ratesbyweek.horasaguaf, "horasaguaf", "0", "F")+ theme(
+      axis.text.y  = element_blank(),
+      axis.title.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      plot.margin = unit(c(1, 1, -2, 1), "lines")),
+    funs(ratesbyweek.horasaguaf, "horasaguaf", "1-7", "G") + theme(
+      axis.text.x  = element_blank(),
+      axis.title.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      plot.margin = unit(c(1, 0.1, 0, 0.1), "lines")),
+    funs(ratesbyweek.horasaguaf, "horasaguaf", "> 7", "H")+ theme(
+      axis.text.y  = element_blank(),
+      axis.title.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      axis.text.x  = element_blank(),
+      axis.title.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      plot.margin = unit(c(1, 1, 0, 1), "lines")),
+    funs(ratesbyweek.bmi, "Obesity_status", "Normoweight", "I")+ theme(
+      axis.text.y  = element_blank(),
+      axis.title.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      plot.margin = unit(c(1, 1, -2, 1), "lines")),
+    funs(ratesbyweek.bmi, "Obesity_status", "Overweight", "J")+ theme(
+      plot.margin = unit(c(1, 0.1, -1, 0.1), "lines")),
+    funs(ratesbyweek.bmi, "Obesity_status", "Obese", "K")+ theme(
+      axis.text.y  = element_blank(),
+      axis.title.y = element_blank(),
+      axis.ticks.y = element_blank(),
+      plot.margin = unit(c(1, 1, -1, 1), "lines")),
+    ncol = ncol
+    
+    
+  )
+}
+
+# Crude
+crude.rate.week <- extract.IR(general_rates_week)
+# ggsave(crude.rate.week, device = "pdf", filename = "Output/JUNE28-2021 crude.rate.week.pdf", units = "in", width = 8, height = 8)
+# ggsave(crude.rate.week, device = "png", filename = "Output/JUNE28-2021 crude.rate.week.png", units = "in", width = 8, height = 8)
+
+
+# adjusted
+ad.rate.week <- extract.IR(rates)
+# ggsave(ad.rate.week, device = "pdf", filename = "Output/JUNE28-2021 ad.rate.week.pdf", units = "in", width = 10, height = 12)
+# ggsave(ad.rate.week, device = "png", filename = "Output/JUNE28-2021 ad.rate.week.png", units = "in", width = 10, height = 12)
+
+
+# rates by cov
+crude.cov.rate.week <- extract.decom(extract.IR2) 
+# ggsave(crude.cov.rate.week, device = "pdf", filename = "Output/FEB11-2021 rates.cov.week.pdf", units = "in", width = 10, height = 12)
+
+
+trends.cov.rate.week <- extract.decom(extract.trends)
+# ggsave(trends.cov.rate.week, device = "pdf", filename = "Output/FEB11-2021 trends.cov.week.pdf", units = "in", width = 10, height = 12)
+
+seasonal.cov.rate.week <- extract.decom(extract.seasonal)
+# ggsave(seasonal.cov.rate.week, device = "pdf", filename = "Output/FEB11-2021 seasonal.cov.week.pdf", units = "in", width = 10, height = 12)
+
+random.cov.rate.week <- extract.decom(extract.random)
+# ggsave(random.cov.rate.week, device = "pdf", filename = "Output/FEB11-2021 random.cov.week.pdf", units = "in", width = 10, height = 12)
+
+
+
+##########3 age adjusted rates by year #############################
+yyad <- CItableCD32 %>%
+  group_by(year, age_groupsf) %>%
+  summarise(event = sum(cases), pyears = sum(PY))
+yyad <- left_join(yy,poblacion_nicaragua) 
+
+
+
+rates.ad = NULL
+for (i in 1:length(unique(CItableCD32$year))) {
+  
+  xx <- yyad %>% filter(year == unique(CItableCD32$year)[i])
+  
+  rat = (ageadjust.direct(xx$event, pop = xx$pyears, 
+                          stdpop = xx$pop, 
+                          conf.level = .95))
+  
+  rates.ad = rbind.data.frame(rates.ad, cbind.data.frame(year = unique(CItableCD32$year)[i],
+                                                       
+                                                   crude.rate = round(rat[1]*1000,2),  
+                                                   ad.rate = round(rat[2]*1000,2),   
+                                                   lower95 = round(rat[3]*1000,2),  
+                                                   higher95 = round(rat[4]*1000,2))) 
+}
+
+#crude.rate is per 1000, ad.rate is not yet multiplied by 1000 but rates are v similar (for diarrhea)
+rates.ad = rates.ad 
+  rename(Incidence_density = ad.rate)
+
